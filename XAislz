@@ -1,0 +1,1094 @@
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+WindUI.TransparencyValue = 0.2
+WindUI:SetTheme("Dark")
+
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local Lighting = game:GetService("Lighting")
+local StarterGui = game:GetService("StarterGui")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local SoundService = game:GetService("SoundService")
+local TweenService = game:GetService("TweenService")
+local TeleportService = game:GetService("TeleportService")
+local TextChatService = game:GetService("TextChatService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local MarketplaceService = game:GetService("MarketplaceService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local VirtualInputManager = Instance.new("VirtualInputManager")
+local VirtualUser = cloneref and cloneref(game:GetService("VirtualUser")) or game:GetService("VirtualUser")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+local Mouse = LocalPlayer:GetMouse()
+
+local function notification(title, text, duration)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = title,
+            Text = text,
+            Duration = duration or 5
+        })
+    end)
+end
+
+local screenOffsetX, screenOffsetY = (function()
+    local gui = Instance.new("ScreenGui", CoreGui)
+    gui.Enabled = false
+    local frame = Instance.new("Frame", gui)
+    local clone = gui:Clone()
+    gui.SafeAreaCompatibility = Enum.SafeAreaCompatibility.FullscreenExtension
+    gui.ScreenInsets = Enum.ScreenInsets.None
+    local dx, dy = clone.AbsolutePosition.X - gui.AbsolutePosition.X, clone.AbsolutePosition.Y - gui.AbsolutePosition.Y
+    gui:Destroy()
+    clone:Destroy()
+    return dx, dy
+end)()
+
+local isMobile = table.find({Enum.Platform.Android, Enum.Platform.IOS}, UserInputService:GetPlatform()) ~= nil
+local friendList = {}
+task.spawn(function()
+    local success, friends = pcall(function()
+        return LocalPlayer:GetFriendsAsync()
+    end)
+    if success and friends then
+        while true do
+            local page = friends:GetCurrentPage()
+            for _, friend in ipairs(page) do
+                table.insert(friendList, friend.Id)
+            end
+            if friends.IsFinished then break end
+            friends:AdvanceToNextPageAsync()
+        end
+    end
+end)
+
+local npcModels = {}
+local unanchoredParts = {}
+local isNPC = function(model)
+    return model:IsA("Model") and model.Parent and model.Parent:IsA("Model")
+end
+local canNetworkOwn = function(part)
+    return not part:IsGrounded() and not part.Anchored and part.ReceiveAge == 0
+end
+
+task.spawn(function()
+    for _, descendant in ipairs(workspace:GetDescendants()) do
+        if isNPC(descendant) then npcModels[descendant.Parent] = true end
+        if descendant:IsA("BasePart") and not descendant.Anchored then
+            table.insert(unanchoredParts, descendant)
+        end
+    end
+end)
+workspace.DescendantAdded:Connect(function(instance)
+    if isNPC(instance) then npcModels[instance.Parent] = true
+    elseif instance:IsA("BasePart") and not instance.Anchored then
+        table.insert(unanchoredParts, instance)
+    end
+end)
+workspace.DescendantRemoving:Connect(function(instance)
+    if isNPC(instance) then npcModels[instance.Parent] = nil end
+end)
+
+local function getTargets(includePlayers, includeNPCs, teamCheck)
+    local targets = {}
+    if includePlayers then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and not teamCheck then
+                table.insert(targets, player.Character)
+            end
+        end
+    end
+    if includeNPCs then
+        for model, _ in pairs(npcModels) do
+            if model ~= LocalPlayer.Character then
+                table.insert(targets, model)
+            end
+        end
+    end
+    return targets
+end
+
+local playerNames = {}
+local selectedPlayer = nil
+local teleportDelay = 0.5
+
+local function updatePlayerNames()
+    playerNames = {"All"}
+    for _, player in ipairs(Players:GetPlayers()) do
+        table.insert(playerNames, player.Name)
+    end
+    table.sort(playerNames, function(a, b) return a:lower() < b:lower() end)
+end
+updatePlayerNames()
+
+local function findPlayer(name, showError)
+    local searchName = name:gsub("%s+", "")
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Name:lower():match("^" .. searchName:lower()) or player.DisplayName:lower():match("^" .. searchName:lower()) then
+            return player
+        end
+    end
+    if showError then notification("XA：错误", "未找到玩家", 5) end
+    return nil
+end
+
+local function startFling()
+    if not selectedPlayer then return end
+    local targetPlayers = {}
+    if selectedPlayer == "All" then
+        targetPlayers = Players:GetPlayers()
+    else
+        targetPlayers = {findPlayer(selectedPlayer)}
+    end
+    local originalCFrame = LocalPlayer.Character.HumanoidRootPart.CFrame
+    local originalDestroyHeight = workspace.FallenPartsDestroyHeight
+    LocalPlayer.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+    workspace.FallenPartsDestroyHeight = 0/0
+    for _, target in pairs(targetPlayers) do
+        local targetChar = target.Character
+        if targetChar then
+            local humanoid = targetChar:FindFirstChildOfClass("Humanoid")
+            local hrp = targetChar:FindFirstChild("HumanoidRootPart")
+            if humanoid and hrp and humanoid.Health > 0 and target ~= LocalPlayer then
+                Camera.CameraSubject = targetChar
+                local function flingSequence(cframeOffset, angle)
+                    LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(hrp.Position) * cframeOffset * angle
+                    LocalPlayer.Character.HumanoidRootPart.Velocity = Vector3.new(0, 1000000, 0)
+                end
+                task.wait()
+                local speed = hrp.Velocity.Magnitude
+                local moveDir = targetChar.Humanoid.MoveDirection
+                local angles = CFrame.Angles(math.rad(100), 0, 0)
+                flingSequence(CFrame.new(0, 1.5, 0) + moveDir * speed / 1.25, angles)
+                task.wait()
+                flingSequence(CFrame.new(0, -1.5, 0) + moveDir * speed / 1.25, angles)
+                task.wait()
+                flingSequence(CFrame.new(2.25, 1.5, -2.25) + moveDir * speed / 1.25, angles)
+                task.wait()
+                flingSequence(CFrame.new(-2.25, -1.5, 2.25) + moveDir * speed / 1.25, angles)
+                task.wait()
+                flingSequence(CFrame.new(0, 1.5, 0) + moveDir, angles)
+                task.wait()
+                flingSequence(CFrame.new(0, -1.5, 0) + moveDir, angles)
+            end
+        end
+    end
+    LocalPlayer.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+    if (LocalPlayer.Character.HumanoidRootPart.Position - originalCFrame.Position).Magnitude < 20 then
+        LocalPlayer.Character.HumanoidRootPart.CFrame = originalCFrame * CFrame.new(0, 0.5, 0)
+    end
+    LocalPlayer.Character.Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+    Camera.CameraSubject = LocalPlayer.Character.Humanoid
+    for _, part in ipairs(LocalPlayer.Character:GetChildren()) do
+        if part:IsA("BasePart") then
+            part.Velocity = Vector3.zero
+            part.RotVelocity = Vector3.zero
+        end
+    end
+    task.wait()
+    if not LocalPlayer.Character.HumanoidRootPart then
+        workspace.FallenPartsDestroyHeight = originalDestroyHeight
+        return true
+    end
+    return (LocalPlayer.Character.HumanoidRootPart.Position - originalCFrame.Position).Magnitude < 20
+end
+
+local function validatePlayer()
+    if not selectedPlayer then
+        notification("XA：错误", "请先选择玩家", 5)
+        return true
+    end
+    if selectedPlayer ~= "All" and not Players:FindFirstChild(selectedPlayer) then
+        notification("XA：错误", "该玩家已离开", 5)
+        return true
+    end
+    return false
+end
+
+local fovCircle = Drawing.new("Circle")
+fovCircle.Thickness = 2
+fovCircle.Color = Color3.fromRGB(255, 255, 255)
+fovCircle.Filled = false
+fovCircle.Radius = 60
+fovCircle.Position = Camera.ViewportSize / 2
+fovCircle.Visible = false
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Parent = CoreGui
+
+local crosshairH = Drawing.new("Line")
+crosshairH.Color = Color3.new(1, 1, 1)
+crosshairH.Thickness = 1
+crosshairH.Visible = false
+
+local crosshairV = Drawing.new("Line")
+crosshairV.Color = Color3.new(1, 1, 1)
+crosshairV.Thickness = 1
+crosshairV.Visible = false
+
+local center = Camera.ViewportSize / 2
+crosshairH.From = Vector2.new(center.X - 10, center.Y)
+crosshairH.To = Vector2.new(center.X + 10, center.Y)
+crosshairV.From = Vector2.new(center.X, center.Y - 10)
+crosshairV.To = Vector2.new(center.X, center.Y + 10)
+
+local shootButton = Instance.new("TextButton", screenGui)
+shootButton.Text = "射击"
+shootButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+shootButton.BackgroundColor3 = Color3.fromRGB(31, 31, 31)
+shootButton.BackgroundTransparency = 0.5
+shootButton.Position = UDim2.new(0, 645, 0, 165)
+shootButton.Size = UDim2.new(0, 55, 0, 55)
+shootButton.Draggable = true
+shootButton.Visible = false
+shootButton.ZIndex = 5
+Instance.new("UICorner", shootButton)
+
+local aimbotToggle = Instance.new("TextButton", screenGui)
+aimbotToggle.TextSize = 10
+aimbotToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+aimbotToggle.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+aimbotToggle.BackgroundTransparency = 0.5
+aimbotToggle.Size = UDim2.new(0, 48, 0, 48)
+aimbotToggle.Text = "OFF"
+aimbotToggle.Position = UDim2.new(0, 16, 0, 48)
+aimbotToggle.Draggable = true
+aimbotToggle.Visible = false
+Instance.new("UICorner", aimbotToggle)
+
+local aimbotConfig = {
+    Enabled = false,
+    FovPosition = "准星",
+    LockMethod = "相机",
+    AimPart = "Head",
+    TeamCheck = false,
+    WallCheck = false,
+    AliveCheck = false,
+    MaxDistance = 400,
+    Smoothness = 0.6,
+    Prediction = 0.15,
+    Targets = {Players = true, NPCs = false},
+    FacingWhenAimbot = false,
+    ShowFOV = false
+}
+
+local function applyAimbot(target)
+    if not target then return end
+    if aimbotConfig.LockMethod == "鼠标" then
+        local mousePos = UserInputService:GetMouseLocation()
+        local screenPos = Camera:WorldToViewportPoint(target.Position + target.Velocity * aimbotConfig.Prediction)
+        local delta = Vector2.new(screenPos.X, screenPos.Y) - Vector2.new(mousePos.X, mousePos.Y)
+        mousemoverel(delta.X * aimbotConfig.Smoothness, delta.Y * aimbotConfig.Smoothness)
+    elseif aimbotConfig.LockMethod == "相机" then
+        local lookAt = CFrame.lookAt(Camera.CFrame.Position, Camera.CFrame.Position + (target.Position + target.Velocity * aimbotConfig.Prediction - Camera.CFrame.Position).Unit)
+        if aimbotConfig.Smoothness > 0 then
+            Camera.CFrame = Camera.CFrame:Lerp(lookAt, aimbotConfig.Smoothness)
+        else
+            Camera.CFrame = lookAt
+        end
+    else
+        local screenPos = Camera:WorldToViewportPoint(target.Position + target.Velocity * aimbotConfig.Prediction)
+        local viewCenter = Camera.ViewportSize / 2
+        if screenPos then
+            local delta = Vector2.new(screenPos.X, screenPos.Y) - viewCenter
+            VirtualInputManager:SendTouchEvent(1, 0, 0, 0)
+            VirtualInputManager:SendTouchEvent(1, 1, delta.X * aimbotConfig.Smoothness, delta.Y * aimbotConfig.Smoothness)
+            VirtualInputManager:SendTouchEvent(1, 2, delta.X * aimbotConfig.Smoothness, delta.Y * aimbotConfig.Smoothness)
+        end
+        if aimbotConfig.FacingWhenAimbot then
+            LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(LocalPlayer.Character.HumanoidRootPart.Position, target.Position)
+        end
+    end
+end
+
+local function checkWall(target, ignoreList)
+    if not aimbotConfig.WallCheck then return true end
+    local origin = Camera.CFrame.Position
+    return workspace:FindPartOnRayWithIgnoreList(Ray.new(origin, target.Position - origin), ignoreList) == nil
+end
+
+local validAimParts = {"Head", "HumanoidRootPart"}
+local currentTarget = nil
+local closestDistance = math.huge
+
+local function findBestTarget()
+    closestDistance = math.huge
+    local targets = getTargets(aimbotConfig.Targets.Players, aimbotConfig.Targets.NPCs, aimbotConfig.TeamCheck)
+    for _, target in pairs(targets) do
+        if target and LocalPlayer.Character and LocalPlayer.Character.HumanoidRootPart then
+            local aimPart = target:FindFirstChild(aimbotConfig.AimPart == "随机" and validAimParts[math.random(2)] or aimbotConfig.AimPart)
+            if aimPart then
+                local inRange = (LocalPlayer.Character.HumanoidRootPart.Position - aimPart.Position).Magnitude < aimbotConfig.MaxDistance
+                if not aimbotConfig.AliveCheck then inRange = true end
+                if aimPart and inRange then
+                    local screenPos, onScreen = Camera:WorldToViewportPoint(aimPart.Position)
+                    if onScreen then
+                        local fovCenter = aimbotConfig.FovPosition == "准星" and Camera.ViewportSize / 2 or UserInputService:GetMouseLocation()
+                        local distance = (fovCenter - Vector2.new(screenPos.X, screenPos.Y)).Magnitude
+                        if distance <= fovCircle.Radius then
+                            local visible = checkWall(aimPart, {LocalPlayer.Character, target})
+                            if distance < closestDistance and visible then
+                                currentTarget = aimPart
+                                closestDistance = distance
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return currentTarget
+end
+
+RunService.RenderStepped:Connect(function()
+    local target = findBestTarget()
+    if aimbotConfig.Enabled then
+        applyAimbot(target)
+    end
+    local fovPos = aimbotConfig.FovPosition == "准星" and Camera.ViewportSize / 2 or UserInputService:GetMouseLocation()
+    if fovCircle.Visible then
+        fovCircle.Position = fovPos
+    end
+end)
+
+shootButton.MouseButton1Click:Connect(function()
+    if not currentTarget then return end
+    local screenPos = Camera:WorldToViewportPoint(currentTarget.Position)
+    if screenPos then
+        local touchId = math.random(999)
+        VirtualInputManager:SendTouchEvent(touchId, 0, screenPos.X + screenOffsetX, screenPos.Y)
+        VirtualInputManager:SendTouchEvent(touchId, 2, screenPos.X + screenOffsetX, screenPos.Y)
+    end
+end)
+
+local dragPart = Instance.new("Part")
+dragPart.Name = "_DragPart"; dragPart.Anchored = true; dragPart.CanCollide = false; dragPart.Transparency = 1
+local dragAttachment = Instance.new("Attachment", dragPart)
+local dragging = false
+local draggedPart = nil
+local dragUI = Instance.new("Frame", screenGui)
+dragUI.Position = UDim2.new(1, -95, 1, -90); dragUI.Size = UDim2.new(0, 70, 0, 70); dragUI.BackgroundTransparency = 1; dragUI.Visible = false
+
+local throwBtn = Instance.new("ImageButton", dragUI)
+throwBtn.Position = UDim2.new(-0.007, 0, -0.957, 0); throwBtn.Size = UDim2.new(0.59, 0, 0.59, 0)
+throwBtn.Image = "rbxassetid://121117383391041"; throwBtn.BackgroundTransparency = 1
+local throwText = Instance.new("TextLabel", throwBtn)
+throwText.Position = UDim2.new(0.5, 0, 0.5, 0); throwText.AnchorPoint = Vector2.new(0.5, 0.5)
+throwText.Size = UDim2.new(0.7, 0, 0.7, 0); throwText.TextSize = 14; throwText.Text = "扔"; throwText.TextColor3 = Color3.new(1,1,1); throwText.BackgroundTransparency = 1
+
+local detachBtn = Instance.new("ImageButton", dragUI)
+detachBtn.Position = UDim2.new(-0.787, 0, -0.578, 0); detachBtn.Size = UDim2.new(0.59, 0, 0.59, 0)
+detachBtn.Image = "rbxassetid://121117383391041"; detachBtn.BackgroundTransparency = 1
+local detachText = Instance.new("TextLabel", detachBtn)
+detachText.Position = UDim2.new(0.5, 0, 0.5, 0); detachText.AnchorPoint = Vector2.new(0.5, 0.5)
+detachText.Size = UDim2.new(0.7, 0, 0.7, 0); detachText.TextSize = 14; detachText.Text = "卸下"; detachText.TextColor3 = Color3.new(1,1,1); detachText.BackgroundTransparency = 1
+
+local objectTorqueEnabled = false
+local throwStrength = 350
+
+local function startDrag(part)
+    draggedPart = part; dragging = true; part.CanCollide = false; dragUI.Visible = true
+    if part:FindFirstChild("Attachment") then part.Attachment:Destroy() end
+    if part:FindFirstChild("AlignPosition") then part.AlignPosition:Destroy() end
+    if part:FindFirstChild("Torque") then part.Torque:Destroy() end
+    local newAttachment = Instance.new("Attachment", part)
+    local alignPos = Instance.new("AlignPosition", part)
+    alignPos.MaxForce = 1000000000; alignPos.MaxVelocity = math.huge; alignPos.Responsiveness = 200
+    alignPos.Attachment0 = newAttachment; alignPos.Attachment1 = dragAttachment
+    local highlight = Instance.new("Highlight", part); highlight.FillTransparency = 1; highlight.OutlineColor = Color3.new(1,1,1)
+    if objectTorqueEnabled then
+        local torque = Instance.new("Torque", part)
+        torque.Torque = Vector3.new(1000000,1000000,1000000); torque.Attachment0 = newAttachment; draggedTorque = torque
+    end
+    local function stopDrag()
+        dragging = false; part.CanCollide = true; dragUI.Visible = false
+        if objectTorqueEnabled then
+            part.AssemblyLinearVelocity = Vector3.zero; part.AssemblyAngularVelocity = Vector3.zero
+            if draggedTorque then draggedTorque:Destroy() end
+        end
+        newAttachment:Destroy(); alignPos:Destroy(); highlight:Destroy()
+    end
+    local function throwPart()
+        stopDrag(); part.Velocity = Camera.CFrame.LookVector * throwStrength
+    end
+    throwBtn.MouseButton1Click:Connect(throwPart)
+    detachBtn.MouseButton1Click:Connect(stopDrag)
+    local dragDistance = (LocalPlayer.Character.HumanoidRootPart.Position - part:GetPivot().Position).Magnitude - 1.5
+    task.spawn(function()
+        while true do
+            if not part.Parent or not canNetworkOwn(part) then stopDrag(); break end
+            if not dragging then break end
+            local head = LocalPlayer.Character:FindFirstChild("Head")
+            if head then
+                dragAttachment.WorldCFrame = Camera.CFrame * CFrame.new(0, 0, -dragDistance)
+            else
+                if isMobile then
+                    dragAttachment.WorldCFrame = CFrame.lookAlong(LocalPlayer.Character.HumanoidRootPart.Position, Camera.CFrame.LookVector * Vector3.new(1,0,1)) * CFrame.new(3,0,-8)
+                else
+                    dragAttachment.WorldCFrame = CFrame.new(Mouse.UnitRay.Origin + Mouse.UnitRay.Direction * dragDistance)
+                end
+            end
+            RunService.RenderStepped:Wait()
+        end
+    end)
+end
+
+throwBtn.MouseButton1Click:Connect(function() throwPart() end)
+detachBtn.MouseButton1Click:Connect(function() stopDrag() end)
+
+local selectedTargetPlayer = nil
+local teleportPoint = nil
+local selectedItems = {}
+
+local selectedNPC = nil
+local selectedNPCPart = nil
+
+Mouse.Button1Down:Connect(function()
+    if not Mouse.Target then return end
+    local model = Mouse.Target:FindFirstAncestorOfClass("Model")
+    if model and not Players:GetPlayerFromCharacter(model) then
+        local primaryPart = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+        if primaryPart then
+            selectedNPC = model; selectedNPCPart = primaryPart
+        end
+    end
+    local targetPart = Mouse.Target
+    if targetPart:IsA("BasePart") and canNetworkOwn(targetPart) then
+        if flags and flags.DragUnanchored and not dragging then startDrag(targetPart) end
+    end
+end)
+
+local Window = WindUI:CreateWindow({
+    Title = "XA Hub",
+    Icon = "target",
+    Author = "无解 | QQ:3490168468",
+    Folder = "XA Hub",
+    Size = UDim2.fromOffset(700, 500),
+    Theme = "Dark",
+    User = {
+        Enabled = false
+    },
+    SideBarWidth = 220,
+    ScrollBarEnabled = true
+})
+
+Window:Tag({ Title = "4.7.1", Color = Color3.fromHex("#306aff") })
+
+local mainTab = Window:Tab({ Title = "通用", Icon = "settings", Locked = false })
+
+local infoSection = mainTab:Section({ Title = "信息", TextXAlignment = "Left", TextSize = 17 })
+infoSection:Paragraph({
+    Title = "用户信息",
+    Content = string.format("用户名: %s\n昵称: %s\nUserId: %d\n注入器: %s\n服务器: 加载中...", 
+        LocalPlayer.Name, LocalPlayer.DisplayName, LocalPlayer.UserId, identifyexecutor())
+})
+
+local playerSection = mainTab:Section({ Title = "选择玩家", TextXAlignment = "Left", TextSize = 17 })
+playerSection:Dropdown({
+    Title = "名称类型",
+    Values = {"用户名", "昵称"},
+    Value = "用户名",
+    Callback = function(option) updatePlayerNames() end
+})
+
+playerSection:Dropdown({
+    Title = "选择玩家",
+    Values = playerNames,
+    Value = "All",
+    Callback = function(option)
+        if option == "All" then
+        end
+        selectedPlayer = option
+    end
+})
+
+playerSection:Slider({
+    Title = "传送延迟",
+    Value = { Min = 0, Max = 5, Default = 0.5 },
+    Step = 0.1,
+    Callback = function(value) teleportDelay = value end
+})
+
+playerSection:Button({
+    Title = "传送",
+    Callback = function()
+        if validatePlayer() then return end
+        if selectedPlayer == "All" then
+            for _, player in ipairs(Players:GetPlayers()) do
+                if player.Character then
+                    LocalPlayer.Character:PivotTo(player.Character:GetPivot())
+                    task.wait(teleportDelay)
+                end
+            end
+        else
+            local target = Players[selectedPlayer]
+            if target and target.Character then
+                LocalPlayer.Character:PivotTo(target.Character:GetPivot())
+            end
+        end
+    end
+})
+
+playerSection:Button({
+    Title = "飞升",
+    Callback = function()
+        if validatePlayer() then return end
+        startFling()
+    end
+})
+
+playerSection:Toggle({
+    Title = "连续飞升",
+    Default = false,
+    Callback = function(state)
+        if state then
+            if validatePlayer() then return end
+            while state do
+                startFling()
+                task.wait(0.5)
+            end
+        end
+    end
+})
+
+playerSection:Toggle({ Title = "定身", Default = false, Callback = function() end })
+playerSection:Toggle({ Title = "锁定玩家", Default = false, Callback = function() end })
+playerSection:Toggle({ Title = "按住玩家", Default = false, Callback = function() end })
+
+playerSection:Dropdown({
+    Title = "方向",
+    Values = {"前", "后", "左", "右", "上", "下"},
+    Value = "前",
+    Callback = function() end
+})
+
+playerSection:Slider({ Title = "TP距离", Value = { Min = 0, Max = 30, Default = 5 }, Step = 0.1, Callback = function() end })
+
+playerSection:Toggle({
+    Title = "镜头跟随",
+    Default = false,
+    Callback = function(state)
+        if state then
+            if validatePlayer() then return end
+            if selectedPlayer == "All" then notification("XA：错误", "暂不支持用All",5); return end
+            local targetChar = Players[selectedPlayer].Character
+            Camera.CameraSubject = targetChar and targetChar:FindFirstChildOfClass("Humanoid")
+        else
+            Camera.CameraSubject = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        end
+    end
+})
+
+local settingsSection = mainTab:Section({ Title = "玩家设置", TextXAlignment = "Left", TextSize = 17 })
+settingsSection:Slider({ Title = "移动速度", Value = { Min = 0, Max = 500, Default = 16 }, Callback = function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then humanoid.WalkSpeed = value end
+    end
+end})
+
+settingsSection:Input({ Title = "移动速度输入", Value = "16", Type = "Input", Placeholder = "速度", Callback = function(input)
+    local speed = tonumber(input)
+    if speed and LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then humanoid.WalkSpeed = speed end
+    end
+end})
+
+settingsSection:Toggle({ Title = "无限跳跃", Default = false, Callback = function() end })
+settingsSection:Slider({ Title = "跳跃高度", Value = { Min = 0, Max = 200, Default = 0 }, Callback = function() end })
+settingsSection:Toggle({ Title = "超级跳", Default = false, Callback = function() end })
+settingsSection:Slider({ Title = "跳跃倍率", Value = { Min = 0, Max = 200, Default = 0 }, Callback = function() end })
+settingsSection:Slider({ Title = "跳跃力量", Value = { Min = 0, Max = 500, Default = 50 }, Callback = function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then humanoid.JumpPower = value end
+    end
+end})
+settingsSection:Input({ Title = "跳跃力量输入", Value = "50", Type = "Input", Callback = function(input)
+    local val = tonumber(input)
+    if val and LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then humanoid.JumpPower = val end
+    end
+end})
+settingsSection:Toggle({ Title = "使用跳跃力量", Default = false, Callback = function(state)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then humanoid.UseJumpPower = state end
+    end
+end})
+settingsSection:Slider({ Title = "飞行速度", Value = { Min = 0, Max = 200, Default = 0 }, Callback = function() end })
+settingsSection:Slider({ Title = "滑翔速度", Value = { Min = 0, Max = 200, Default = 2 }, Callback = function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then humanoid.HipHeight = value end
+    end
+end})
+settingsSection:Input({ Title = "滑翔速度输入", Value = "2", Type = "Input", Callback = function(input)
+    local val = tonumber(input)
+    if val and LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then humanoid.HipHeight = val end
+    end
+end})
+settingsSection:Slider({ Title = "最大倾斜角度", Value = { Min = 0, Max = 90, Default = 89 }, Callback = function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then humanoid.MaxSlopeAngle = value end
+    end
+end})
+settingsSection:Slider({ Title = "视野范围", Value = { Min = 0, Max = 120, Default = 70 }, Callback = function(value) Camera.FieldOfView = value end })
+settingsSection:Input({ Title = "视野范围输入", Value = "70", Type = "Input", Callback = function(input) Camera.FieldOfView = tonumber(input) or 70 end })
+settingsSection:Toggle({ Title = "无坠落伤害", Default = false, Callback = function() end })
+settingsSection:Slider({ Title = "重力", Value = { Min = 0, Max = 200, Default = 196.2 }, Callback = function(value) workspace.Gravity = value end })
+settingsSection:Input({ Title = "重力输入", Value = "196.2", Type = "Input", Callback = function(input) workspace.Gravity = tonumber(input) or 196.2 end })
+settingsSection:Input({ Title = "相机最大距离", Value = tostring(LocalPlayer.CameraMaxZoomDistance), Type = "Input", Callback = function(input) LocalPlayer.CameraMaxZoomDistance = tonumber(input) or 400 end })
+settingsSection:Input({ Title = "最大血量", Value = "100", Type = "Input", Callback = function(input)
+    local val = tonumber(input)
+    if val and LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then humanoid.MaxHealth = val end
+    end
+end})
+settingsSection:Input({ Title = "血量", Value = "100", Type = "Input", Callback = function(input)
+    local val = tonumber(input)
+    if val and LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then humanoid.Health = val end
+    end
+end})
+settingsSection:Dropdown({ Title = "相机类型", Values = {"Custom","Attach","Fixed","Follow","Watch","Scriptable","Track","FirstPerson","ThirdPerson"}, Value = "Custom", Callback = function(option) Camera.CameraType = Enum.CameraType[option] end })
+settingsSection:Dropdown({ Title = "相机模式", Values = {"Classic","LockFirstPerson"}, Value = "Classic", Callback = function(option) LocalPlayer.CameraMode = option end })
+settingsSection:Toggle({ Title = "相机穿透", Default = false, Callback = function(state) LocalPlayer.DevCameraOcclusionMode = state and Enum.DevCameraOcclusionMode.Invisicam or Enum.DevCameraOcclusionMode.Zoom end })
+settingsSection:Toggle({ Title = "自由相机", Default = false, Callback = function(state)
+    local freecam = loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Content/Freecam.lua"))(screenGui)
+    if state then freecam() else if freecam and freecam.stop then freecam.stop() end end
+end})
+settingsSection:Input({ Title = "自由相机速度", Value = "1", Type = "Input", Callback = function() end })
+settingsSection:Toggle({ Title = "自动跳跃", Default = false, Callback = function(state)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then humanoid.AutoJumpEnabled = state end
+    end
+end})
+settingsSection:Button({ Title = "刷新角色", Callback = function()
+    if LocalPlayer.Character then notification("XA：提示", "已检测到角色",5) else notification("XA：提示", "没有检测到角色",5) end
+end})
+
+local utilSection = mainTab:Section({ Title = "工具", TextXAlignment = "Left", TextSize = 17 })
+utilSection:Button({ Title = "飞行Gui V3", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/main/Content/FlyGuiV3"))() end })
+utilSection:Button({ Title = "绕过闲置", Callback = function()
+    for _, conn in ipairs(getconnections(LocalPlayer.Idled)) do
+        if conn.Disable then conn:Disable() elseif conn.Disconnect then conn:Disconnect() end
+    end
+end})
+utilSection:Button({ Title = "Delta键盘", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Content/DeltaKeyBoard.lua"))() end })
+utilSection:Button({ Title = "创建工具", Callback = function()
+    local copyBin = Instance.new("HopperBin"); copyBin.Name = "复制"; copyBin.BinType = 3; copyBin.Parent = LocalPlayer.Backpack
+    local deleteBin = Instance.new("HopperBin"); deleteBin.Name = "删除"; deleteBin.BinType = 4; deleteBin.Parent = LocalPlayer.Backpack
+end})
+utilSection:Button({ Title = "Infinite Yield", Callback = function() loadstring(game:GetObjects("rbxassetid://6695644299")[1].Source)() end })
+utilSection:Button({ Title = "BB+", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/boyscp/scriscriptsc/main/bbn.lua"))() end })
+utilSection:Button({ Title = "重新加入", Callback = function()
+    if #Players:GetPlayers() <= 1 then
+        LocalPlayer:Kick("重新加入中..."); wait()
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    else
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end
+end})
+utilSection:Button({ Title = "复制重连代码", Callback = function() setclipboard(string.format("game:GetService(\"TeleportService\"):Teleport(%d, game:GetService(\"Players\").LocalPlayer)", game.PlaceId)) end })
+utilSection:Button({ Title = "复制重连实例代码", Callback = function() setclipboard(string.format("game:GetService(\"TeleportService\"):TeleportToPlaceInstance(%d, \"%s\", game:GetService(\"Players\").LocalPlayer)", game.PlaceId, game.JobId)) end })
+utilSection:Button({ Title = "复制CFrame", Callback = function()
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        setclipboard("CFrame.new(" .. tostring(LocalPlayer.Character.HumanoidRootPart.Position) .. ")")
+    end
+end})
+utilSection:Button({ Title = "Shiftlock", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Content/Shiftlock.lua"))() end })
+utilSection:Button({ Title = "高画质", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/main/Content/HighQuality"))() end })
+utilSection:Button({ Title = "图形设置", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/MZEEN2424/Graphics/main/Graphics.xml"))() end })
+
+utilSection:Toggle({ Title = "全亮", Default = false, Callback = function(state)
+    if not state then Lighting.Ambient = Color3.new(0,0,0) end
+    for _, effect in ipairs(Lighting:GetDescendants()) do if effect:IsA("PostEffect") then effect.Enabled = not state end end
+end})
+utilSection:Toggle({ Title = "去雾", Default = false, Callback = function(state)
+    Lighting.FogEnd = 100000
+    for _, atmosphere in ipairs(Lighting:GetDescendants()) do if atmosphere:IsA("Atmosphere") then atmosphere:Destroy() end end
+end})
+utilSection:Toggle({ Title = "无阴影", Default = false, Callback = function(state) Lighting.GlobalShadows = not state end })
+utilSection:Toggle({ Title = "飞行模式", Default = false, Callback = function(state) if state then LocalPlayer.Character.Humanoid:ChangeState("Flying") end end })
+utilSection:Toggle({ Title = "无触碰", Default = false, Callback = function(state)
+    if not state then
+        for _, part in ipairs(LocalPlayer.Character:GetDescendants()) do if part:IsA("BasePart") then part.CanTouch = true end end
+    end
+end})
+utilSection:Button({ Title = "载具飞行", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/main/Content/VehicleFly"))() end })
+
+local networkTab = Window:Tab({ Title = "网络所有权", Icon = "wifi", Locked = false })
+local netSection = networkTab:Section({ Title = "玩家物体控制", TextXAlignment = "Left", TextSize = 17 })
+
+netSection:Dropdown({ Title = "选择玩家", Values = getPlayerList(), Value = "", Multi = false, Callback = function(option) selectedTargetPlayer = option end })
+netSection:Button({ Title = "传送未锚固物体给他", Callback = function()
+    if not selectedTargetPlayer or not Players[selectedTargetPlayer] then notification("提示","请先选择玩家",5) return end
+    if not Players[selectedTargetPlayer].Character then return end
+    for _, part in pairs(unanchoredParts) do
+        if part.Parent and not part:IsDescendantOf(LocalPlayer.Character) and canNetworkOwn(part) then
+            part.CFrame = Players[selectedTargetPlayer].Character:GetPivot()
+        end
+    end
+end})
+netSection:Button({ Title = "使用未锚固物体甩飞", Callback = function()
+    if not selectedTargetPlayer then notification("提示","请先选择玩家",5) return end
+    local targetChar = Players[selectedTargetPlayer].Character
+    if not targetChar then return end
+    for _, part in pairs(unanchoredParts) do
+        if part.Parent and not part:IsDescendantOf(LocalPlayer.Character) and canNetworkOwn(part) then
+            if not targetChar.Parent then
+                task.wait()
+                part.CFrame = targetChar:GetPivot()
+                part.Velocity = Vector3.new(0, 1000000, 0)
+                if not targetChar.Parent or targetChar.PrimaryPart.Velocity.Magnitude > 200 then break end
+            end
+        end
+    end
+end})
+netSection:Button({ Title = "传送未锚固物体至自己", Callback = function()
+    for _, part in pairs(unanchoredParts) do
+        if part.Parent and not part:IsDescendantOf(LocalPlayer.Character) then
+            part.CFrame = LocalPlayer.Character.HumanoidRootPart.CFrame
+        end
+    end
+end})
+netSection:Toggle({ Title = "拖动未锚固物体", Default = false, Callback = function(state)
+    if state then dragPart.Parent = workspace else dragPart.Parent = nil; dragging = false end
+end})
+netSection:Slider({ Title = "扔的力度", Value = { Min = 0, Max = 500, Default = 350 }, Callback = function(value) throwStrength = value end })
+netSection:Toggle({ Title = "物体旋转", Default = false, Callback = function(state) objectTorqueEnabled = state end })
+netSection:Toggle({ Title = "最大模拟半径", Default = false, Callback = function(state) if state then LocalPlayer.SimulationRadius = math.huge end end })
+
+local teleportSection = networkTab:Section({ Title = "传送未锚固物体", TextXAlignment = "Left", TextSize = 17 })
+teleportSection:Button({ Title = "设置传送点", Callback = function()
+    pcall(function() if workspace:FindFirstChild("BasedropCord") then workspace.BasedropCord:Destroy() end end)
+    local point = Instance.new("Part"); point.Name = "BasedropCord"; point.Anchored = true; point.CanCollide = false; point.Parent = workspace
+    point.Shape = Enum.PartType.Ball; point.Size = Vector3.new(2,2,2); point.Color = Color3.fromRGB(0,217,255); point.Material = Enum.Material.ForceField
+    point.CFrame = LocalPlayer.Character.HumanoidRootPart.CFrame; teleportPoint = point.CFrame
+end})
+teleportSection:Button({ Title = "删除传送点", Callback = function() pcall(function() if workspace:FindFirstChild("BasedropCord") then workspace.BasedropCord:Destroy() end end) end })
+teleportSection:Toggle({ Title = "点击以选择物品", Default = false, Callback = function() end })
+
+local orbitSection = networkTab:Section({ Title = "物体环绕", TextXAlignment = "Left", TextSize = 17 })
+orbitSection:Toggle({ Title = "开关", Default = false, Callback = function(state) flags.Blackhole = state end })
+orbitSection:Slider({ Title = "半径", Value = { Min = 0, Max = 100, Default = 50 }, Callback = function(value) flags.RingRadius = value end })
+orbitSection:Input({ Title = "高度", Value = "100", Type = "Input", Callback = function(v) flags.RingHeight = tonumber(v) or 100 end })
+orbitSection:Input({ Title = "旋转速度", Value = "10", Type = "Input", Callback = function(v) flags.RotationSpeed = tonumber(v) or 10 end })
+orbitSection:Input({ Title = "吸引力强度", Value = "1000", Type = "Input", Callback = function(v) flags.AttractionStrength = tonumber(v) or 1000 end })
+
+flags = flags or {}
+RunService.Heartbeat:Connect(function()
+    if flags.Blackhole and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        local center = LocalPlayer.Character.HumanoidRootPart.Position
+        for _, part in pairs(unanchoredParts) do
+            if part.Parent and not part:IsDescendantOf(LocalPlayer.Character) and canNetworkOwn(part) then
+                part.Massless = true
+                local partPos = part.Position
+                local distance = (Vector3.new(partPos.X, center.Y, partPos.Z) - center).Magnitude
+                local angle = math.atan2(partPos.Z - center.Z, partPos.X - center.X) + math.rad(flags.RotationSpeed or 10)
+                part.Velocity = (Vector3.new(
+                    center.X + math.cos(angle) * math.min(flags.RingRadius or 50, distance),
+                    center.Y + (flags.RingHeight or 100) * math.abs(math.sin((partPos.Y - center.Y) / (flags.RingHeight or 100))),
+                    center.Z + math.sin(angle) * math.min(flags.RingRadius or 50, distance)
+                ) - part.Position).unit * (flags.AttractionStrength or 1000)
+            end
+        end
+    end
+end)
+
+local npcSection = networkTab:Section({ Title = "NPC控制", TextXAlignment = "Left", TextSize = 17 })
+npcSection:Toggle({ Title = "点击以选择NPC", Default = false, Callback = function() end })
+npcSection:Button({ Title = "杀死NPC", Callback = function()
+    if selectedNPC and selectedNPCPart and canNetworkOwn(selectedNPCPart) then
+        local humanoid = selectedNPC:FindFirstChildOfClass("Humanoid")
+        if humanoid then humanoid.Health = 0 end
+    end
+end})
+npcSection:Button({ Title = "带来NPC", Callback = function()
+    if selectedNPC and selectedNPCPart and canNetworkOwn(selectedNPCPart) then
+        selectedNPC:PivotTo(LocalPlayer.Character.HumanoidRootPart.CFrame)
+    end
+end})
+npcSection:Button({ Title = "传送至NPC", Callback = function()
+    if selectedNPC then LocalPlayer.Character:PivotTo(selectedNPC:GetPivot()) end
+end})
+npcSection:Toggle({ Title = "控制NPC", Default = false, Callback = function(state)
+    if state and selectedNPC and selectedNPCPart and canNetworkOwn(selectedNPCPart) then
+        originalCharacter = LocalPlayer.Character; LocalPlayer.Character = selectedNPC
+        local humanoid = selectedNPC:FindFirstChildOfClass("Humanoid")
+        if humanoid then Camera.CameraSubject = humanoid end
+    else
+        if originalCharacter then
+            LocalPlayer.Character = originalCharacter
+            Camera.CameraSubject = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        end
+    end
+end})
+npcSection:Button({ Title = "甩飞NPC", Callback = function()
+    if selectedNPC and selectedNPCPart and canNetworkOwn(selectedNPCPart) then
+        selectedNPCPart.Velocity = Vector3.new(9000000000,9000000000,9000000000)
+    end
+end})
+npcSection:Toggle({ Title = "冻住NPC", Default = false, Callback = function(state)
+    if state and selectedNPC and selectedNPCPart and canNetworkOwn(selectedNPCPart) then
+        local bodyPos = Instance.new("BodyPosition", selectedNPCPart)
+        bodyPos.Name = "_BodyPosition"; bodyPos.Position = selectedNPCPart.Position; bodyPos.MaxForce = Vector3.new(math.huge,math.huge,math.huge)
+        local bodyGyro = Instance.new("BodyGyro", selectedNPCPart)
+        bodyGyro.Name = "_BodyGyro"; bodyGyro.CFrame = selectedNPCPart.CFrame; bodyGyro.MaxTorque = Vector3.new(math.huge,math.huge,math.huge)
+    else
+        if selectedNPC and selectedNPCPart then
+            for _, child in ipairs(selectedNPCPart:GetChildren()) do
+                if child.Name == "_BodyPosition" or child.Name == "_BodyGyro" then child:Destroy() end
+            end
+        end
+    end
+end})
+npcSection:Button({ Title = "让NPC跳", Callback = function()
+    if selectedNPC and selectedNPCPart and canNetworkOwn(selectedNPCPart) then
+        local humanoid = selectedNPC:FindFirstChildOfClass("Humanoid")
+        if humanoid then humanoid:ChangeState(3) end
+    end
+end})
+npcSection:Toggle({ Title = "NPC杀戮光环", Default = false, Callback = function(state)
+    while state do
+        for model, _ in pairs(npcModels) do
+            local aimPart = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChildWhichIsA("BasePart")
+            if aimPart and canNetworkOwn(aimPart) then
+                if (LocalPlayer.Character.HumanoidRootPart.Position - aimPart.Position).Magnitude <= (flags.NPCKillAuraRange or 15) then
+                    local humanoid = model:FindFirstChildOfClass("Humanoid")
+                    if humanoid then humanoid.Health = 0 end
+                end
+            end
+        end
+        RunService.RenderStepped:Wait()
+    end
+end})
+npcSection:Slider({ Title = "NPC杀戮光环范围", Value = { Min = 0, Max = 50, Default = 15 }, Callback = function(value) flags.NPCKillAuraRange = value end })
+
+local aimbotTab = Window:Tab({ Title = "自瞄", Icon = "crosshair", Locked = false })
+local aimSection = aimbotTab:Section({ Title = "自瞄设置", TextXAlignment = "Left", TextSize = 17 })
+
+local aimbotToggleBtn = aimSection:Toggle({ Title = "自瞄开关", Default = false, Callback = function(state)
+    aimbotConfig.Enabled = state
+    fovCircle.Visible = state and aimbotConfig.ShowFOV or false
+    aimbotToggle.Text = state and "ON" or "OFF"
+    aimbotToggle.BackgroundColor3 = state and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
+end})
+
+aimSection:Slider({ Title = "平滑度", Value = { Min = 0, Max = 1, Default = 0.6 }, Step = 0.1, Callback = function(value) aimbotConfig.Smoothness = value end })
+aimSection:Slider({ Title = "FOV范围", Value = { Min = 1, Max = 2000, Default = 400 }, Callback = function(value) aimbotConfig.MaxDistance = value; fovCircle.Radius = value end })
+aimSection:Dropdown({ Title = "瞄准部位", Values = {"Head", "HumanoidRootPart"}, Value = "Head", Callback = function(option) aimbotConfig.AimPart = option end })
+aimSection:Toggle({ Title = "忽略队友", Default = true, Callback = function(state) aimbotConfig.TeamCheck = state end })
+aimSection:Toggle({ Title = "只打敌人", Default = false, Callback = function() end })
+aimSection:Toggle({ Title = "穿墙自瞄", Default = false, Callback = function(state) aimbotConfig.WallCheck = state end })
+aimSection:Toggle({ Title = "显示FOV圆圈", Default = false, Callback = function(state) aimbotConfig.ShowFOV = state; fovCircle.Visible = state and aimbotConfig.Enabled end })
+aimSection:Toggle({ Title = "平滑转向", Default = true, Callback = function() end })
+aimSection:Toggle({ Title = "目标切换", Default = false, Callback = function() end })
+aimSection:Toggle({ Title = "对敌转向", Default = false, Callback = function(state) aimbotConfig.FacingWhenAimbot = state end })
+aimSection:Toggle({ Title = "准星", Default = false, Callback = function(state) crosshairH.Visible = state; crosshairV.Visible = state end })
+aimSection:Toggle({ Title = "射击按钮", Default = false, Callback = function(state) shootButton.Visible = state end })
+aimSection:Toggle({ Title = "自瞄状态", Default = false, Callback = function(state) aimbotToggle.Visible = state end })
+aimSection:Dropdown({ Title = "锁定模式", Values = {"相机", "鼠标", "触摸"}, Value = "相机", Callback = function(option) aimbotConfig.LockMethod = option end })
+aimSection:Dropdown({ Title = "FOV位置", Values = {"准星", "鼠标"}, Value = "准星", Callback = function(option) aimbotConfig.FovPosition = option end })
+aimSection:Toggle({ Title = "玩家自瞄", Default = true, Callback = function(state) aimbotConfig.Targets.Players = state end })
+aimSection:Toggle({ Title = "NPC自瞄", Default = false, Callback = function(state) aimbotConfig.Targets.NPCs = state end })
+aimSection:Toggle({ Title = "存活检查", Default = false, Callback = function(state) aimbotConfig.AliveCheck = state end })
+aimSection:Slider({ Title = "最大距离", Value = { Min = 100, Max = 2000, Default = 800 }, Callback = function(value) aimbotConfig.MaxDistance = value end })
+aimSection:Slider({ Title = "预判(毫秒)", Value = { Min = 0, Max = 500, Default = 150 }, Callback = function(value) aimbotConfig.Prediction = value / 1000 end })
+
+local weaponTab = Window:Tab({ Title = "枪械修改", Icon = "gun", Locked = false })
+local weaponSection = weaponTab:Section({ Title = "武器增强", TextXAlignment = "Left", TextSize = 17 })
+
+weaponSection:Toggle({ Title = "无后坐力", Default = false, Callback = function(state)
+    local gc = getgc(true)
+    for _, obj in pairs(gc) do
+        if type(obj) == "table" and rawget(obj, "shove") then
+            if state then
+                local orig = obj.shove
+                obj.shove = function(...) return end
+            end
+        end
+    end
+end})
+
+weaponSection:Toggle({ Title = "快速开镜", Default = false, Callback = function(state)
+end})
+
+weaponSection:Toggle({ Title = "无阻力/无下坠", Default = false, Callback = function(state)
+    local bulletTypes = ReplicatedStorage:FindFirstChild("AmmoTypes")
+    if bulletTypes then
+        for _, bullet in ipairs(bulletTypes:GetChildren()) do
+            if state then
+                bullet:SetAttribute("Drag", 0)
+                bullet:SetAttribute("ProjectileDrop", 0)
+            else
+                bullet:SetAttribute("Drag", nil)
+                bullet:SetAttribute("ProjectileDrop", nil)
+            end
+        end
+    end
+end})
+
+weaponSection:Toggle({ Title = "自定义射速", Default = false, Callback = function(state)
+end})
+weaponSection:Slider({ Title = "射速(秒/发)", Value = { Min = 0.001, Max = 0.5, Default = 0.5 }, Step = 0.001, Callback = function(value)
+end})
+
+weaponSection:Toggle({ Title = "半自动改全自动", Default = false, Callback = function(state)
+    local gc = getgc(true)
+    for _, obj in pairs(gc) do
+        if type(obj) == "table" and rawget(obj, "FireModeIndex") then
+            obj.FireModeIndex = state and 2 or 1
+        end
+    end
+end})
+
+local scriptsTab = Window:Tab({ Title = "脚本库", Icon = "code", Locked = false })
+local scriptSection = scriptsTab:Section({ Title = "游戏脚本", TextXAlignment = "Left", TextSize = 17 })
+
+scriptSection:Dropdown({ Title = "选择游戏", Values = {}, Value = "", Callback = function(option) selectedGameScript = option .. ".lua" end })
+scriptSection:Button({ Title = "加载脚本", Callback = function()
+    if not selectedGameScript then notification("提示","请先选择游戏",5) return end
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Games/" .. selectedGameScript))()
+end})
+scriptSection:Button({ Title = "复制脚本链接", Callback = function()
+    if not selectedGameScript then notification("提示","请先选择游戏",5) return end
+    setclipboard("loadstring(game:HttpGet(\"https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Games/" .. selectedGameScript .. "\"))()")
+end})
+scriptSection:Button({ Title = "加载脚本加载器", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/GameLoad.lua"))() end })
+scriptSection:Button({ Title = "复制脚本加载器链接", Callback = function() setclipboard("loadstring(game:HttpGet(\"https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/GameLoad.lua\"))()") end })
+
+local adminSection = scriptsTab:Section({ Title = "管理脚本", TextXAlignment = "Left", TextSize = 17 })
+adminSection:Button({ Title = "Infinite Yield", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"))() end })
+adminSection:Button({ Title = "Nameless Admin", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/FilteringEnabled/NamelessAdmin/main/Source"))() end })
+adminSection:Button({ Title = "CMD-X", Callback = function() loadstring(game:HttpGet("https://glot.io/snippets/gzrux646yj/raw/main.ts"))() end })
+adminSection:Button({ Title = "CMD-X (备用)", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/CMD-X/CMD-X/master/Source", true))() end })
+adminSection:Button({ Title = "Vape V4", Callback = function() loadstring(game:GetObjects("rbxassetid://8127297852")[1].Source)() end })
+adminSection:Button({ Title = "Cool GUI", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/theawesomari0/c00lgui/main/c00lgui", true))() end })
+adminSection:Button({ Title = "Crescent", Callback = function() loadstring(game:HttpGet("https://pastebin.com/raw/JipYNCht", true))() end })
+adminSection:Button({ Title = "控制器", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Content/Controller.lua"))() end })
+adminSection:Input({ Title = "换肤", Value = "", Type = "Input", Placeholder = "输入玩家名", Callback = function(input)
+    LocalPlayer:ClearCharacterAppearance()
+    local description = Players:GetHumanoidDescriptionFromUserId(Players:GetUserIdFromNameAsync(input))
+    LocalPlayer.Character.Humanoid:ApplyDescriptionClientServer(description)
+end})
+
+local reachSection = scriptsTab:Section({ Title = "范围攻击", TextXAlignment = "Left", TextSize = 17 })
+reachSection:Toggle({ Title = "范围攻击开关", Default = false, Callback = function(state)
+    while state do
+        task.wait()
+        local tool = LocalPlayer.Character:FindFirstChildWhichIsA("Tool")
+        local touchTransmitter = tool and tool:FindFirstChildWhichIsA("TouchTransmitter", true)
+        if touchTransmitter then
+            local targets = getTargets(true, true, false)
+            local overlapParams = OverlapParams.new()
+            overlapParams.FilterType = Enum.RaycastFilterType.Blacklist
+            overlapParams.FilterDescendantsInstances = targets
+            local size = touchTransmitter.Parent.Size + Vector3.new(10,10,10)
+            local parts = workspace:GetPartBoundsInBox(touchTransmitter.Parent.CFrame, size, overlapParams)
+            for _, part in pairs(parts) do
+                tool:Activate()
+                firetouchinterest(touchTransmitter.Parent, part, 1)
+                firetouchinterest(touchTransmitter.Parent, part, 0)
+            end
+        end
+    end
+end})
+reachSection:Slider({ Title = "范围", Value = { Min = 0, Max = 30, Default = 10 }, Callback = function(value) reachRange = value end })
+reachSection:Toggle({ Title = "攻击玩家", Default = true, Callback = function() end })
+reachSection:Toggle({ Title = "攻击NPC", Default = false, Callback = function() end })
+reachSection:Toggle({ Title = "队伍检查", Default = false, Callback = function() end })
+
+local settingsTab = Window:Tab({ Title = "设置", Icon = "settings", Locked = false })
+local setSection = settingsTab:Section({ Title = "界面", TextXAlignment = "Left", TextSize = 17 })
+setSection:Input({ Title = "透明度", Value = "0.2", Type = "Input", Callback = function(input)
+    local alpha = tonumber(input) or 0.2
+    WindUI.TransparencyValue = alpha
+end})
+setSection:Button({ Title = "重设位置", Callback = function() WindUI:ResetPosition() end })
+
+local toolsSection = settingsTab:Section({ Title = "工具", TextXAlignment = "Left", TextSize = 17 })
+toolsSection:Button({ Title = "Dex Explorer", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Tools/DexMobile.lua"))() end })
+toolsSection:Button({ Title = "Simple Spy", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Tools/SimpleSpy.lua"))() end })
+toolsSection:Button({ Title = "Hydroxide", Callback = function()
+    local repo = "Hosvile"; local branch = "revision"
+    local function loadScript(name)
+        local url = string.format("https://raw.githubusercontent.com/%s/MC-Hydroxide/%s/%s.lua", repo, branch, name)
+        return loadstring(game:HttpGetAsync(url), name .. ".lua")()
+    end
+    loadScript("init"); loadScript("ui/main")
+end})
+toolsSection:Button({ Title = "UNC检测", Callback = function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/main/Tools/UNCTest.lua"))() end })
+toolsSection:Button({ Title = "反踢", Callback = function()
+    local oldKick = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+        if self == LocalPlayer and method:lower() == "kick" then
+            StarterGui:SetCore("SendNotification", {Title = "提示", Text = "成功拦截踢出"})
+            warn(debug.traceback()); return coroutine.yield()
+        end
+        return oldKick(self, ...)
+    end))
+    hookfunction(LocalPlayer.Kick, function(...)
+        StarterGui:SetCore("SendNotification", {Title = "提示", Text = "成功拦截踢出"})
+        warn(debug.traceback()); return coroutine.yield()
+    end)
+    game.GuiService.ErrorMessageChanged:Connect(function(msg) game.GuiService:ClearError(); print("Kick Has Occured: " .. msg) end)
+end})
+
+local miscSection = settingsTab:Section({ Title = "杂项", TextXAlignment = "Left", TextSize = 17 })
+miscSection:Toggle({ Title = "掉线警告", Default = false, Callback = function(state)
+    while state do
+        task.wait()
+        if tick() - pingStartTime > 5 and not pingWarned then
+            notification("XA：警告", "您可能已经掉线",5); pingWarned = true
+        end
+    end
+end})
+miscSection:Toggle({ Title = "显示FPS", Default = false, Callback = function(state)
+    if state then
+        local fpsGui = Instance.new("ScreenGui", CoreGui); fpsGui.Name = "FPSGui"
+        local fpsLabel = Instance.new("TextLabel", fpsGui)
+        fpsLabel.BackgroundTransparency = 1; fpsLabel.Position = UDim2.new(0.78,0,0,0); fpsLabel.Size = UDim2.new(0,130,0,30)
+        fpsLabel.Font = Enum.Font.SourceSans; fpsLabel.Text = "FPS: 0"; fpsLabel.TextSize = 14; fpsLabel.TextColor3 = Color3.new(1,1,1)
+        RunService.RenderStepped:Connect(function(dt) fpsLabel.Text = "FPS: " .. math.floor(1/dt) end)
+    else
+        if CoreGui:FindFirstChild("FPSGui") then CoreGui.FPSGui:Destroy() end
+    end
+end})
+miscSection:Toggle({ Title = "显示网络拥有者", Default = false, Callback = function(state) settings().Physics.AreOwnersShown = state end })
+miscSection:Input({ Title = "延迟补偿", Value = "", Type = "Input", Callback = function() settings().Network.IncomingReplicationLag = math.huge end })
+miscSection:Input({ Title = "发送消息", Value = "", Type = "Input", Callback = function(input) messageToSend = input end })
+miscSection:Button({ Title = "发送", Callback = function() sendMessage(messageToSend, true, false) end })
+miscSection:Button({ Title = "记录CFrame", Callback = function() savedCFrame = LocalPlayer.Character.HumanoidRootPart.CFrame end })
+miscSection:Button({ Title = "传送到记录点", Callback = function()
+    if savedCFrame then LocalPlayer.Character:PivotTo(savedCFrame) else notification("错误","没有检测到位置",5) end
+end})
+miscSection:Button({ Title = "打开控制台", Callback = function() StarterGui:SetCore("DevConsoleVisible", true) end })
+miscSection:Button({ Title = "解锁FPS", Callback = function() setfpscap(120) end })
+miscSection:Button({ Title = "关闭游戏", Callback = function() game:Shutdown() end })
+
+local feedbackTab = Window:Tab({ Title = "反馈", Icon = "mail", Locked = false })
+local feedbackSection = feedbackTab:Section({ Title = "发送建议", TextXAlignment = "Left", TextSize = 17 })
+feedbackSection:Input({ Title = "建议", Value = "", Type = "Textarea", Placeholder = "输入建议...", Callback = function(input)
+    if input == "" then return notification("提示","请输入内容",5) end
+    local data = {embeds = {{color = 65280, fields = {{name = "用户", value = LocalPlayer.Name}, {name = "建议", value = input}}}}}
+    request({Url = "https://discord.com/api/webhooks/1380956596691144865/D0TKd1ohAUdrGboCK9DsbuXdx3caDgkqCg6JCjD3WWNffasp5jWY9hjM4YuI5k1_kVp3", Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = HttpService:JSONEncode(data)})
+    notification("提示","发送成功",5)
+end})
+feedbackSection:Paragraph({ Title = "交流群", Content = "XA Hub 交流群: 1057545155" })
+feedbackSection:Button({ Title = "复制群号", Callback = function() setclipboard("1057545155") end })
+feedbackSection:Paragraph({ Title = "版本", Content = "Beta-4.7.1 - WindUI" })
+
+notification("XA：提示", "脚本加载完成",5)
+print("XA Hub (WindUI) 加载完成")
