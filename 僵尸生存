@@ -1,0 +1,704 @@
+local P = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local W = game:GetService("Workspace")
+local R = game:GetService("RunService")
+local Debris = game:GetService("Debris")
+local Cam = W.CurrentCamera
+local LP = P.LocalPlayer
+
+local Rem = RS:WaitForChild("Remotes")
+local VB = Rem:WaitForChild("VisualizeBullet")
+local VM = Rem:FindFirstChild("VisualizeMuzzle")
+local PA = Rem:FindFirstChild("PlayAudio")
+local VH = Rem:FindFirstChild("VisualizeHit")
+local Repair = RS:FindFirstChild("Repair")
+
+-- 真实建筑伤害事件
+local DamagedBarricade = RS:FindFirstChild("DamagedBarricade")
+
+local Eff = RS:FindFirstChild("Effects")
+local Hit = Eff and Eff:FindFirstChild("HitEffect")
+local Blood = Eff and Eff:FindFirstChild("BloodEffect")
+local Exp = Eff and Eff:FindFirstChild("ExplosionEffect")
+local Muz = Eff and Eff:FindFirstChild("MuzzleEffect")
+
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+WindUI.TransparencyValue = 0.2
+WindUI:SetTheme("Dark")
+
+local C = {
+    On = false,
+    Gun = "SSG",
+    Plr = true,
+    Npc = true,
+    Team = true,
+    Fov = 400,
+    Dist = 2000,
+    Interval = 0.05,
+    Spd = 99999,
+    Rng = 99999,
+    Pen = "HumanoidPenetration",
+    
+    Tracer3D = true,
+    Line2D = true,
+    TracerColor = Color3.fromRGB(255, 50, 50),
+    
+    Circle = true,
+    Reload = true,
+    Muzzle = true,
+    Sound = true,
+    AutoEquip = true,
+    ForceHit = true,
+
+    RepairOn = false, RepairAmt = 10, RepairRange = 200, RepairMax = 80,
+    RepairCd = 0, RepairVisual = false, RepairOnlyBroken = false,
+
+    -- 僵尸路障拆除配置
+    AttackOn = false, AttackForce = 35, AttackRange = 150, AttackCd = 0.05, 
+    AttackVisual = false, AttackMax = 15, MuteMoan = true
+}
+
+local shots = 0
+local active = false
+local tgt = nil
+local last = 0
+local repairStats = {n = 0, parts = 0}
+local attackStats = {n = 0}
+local repairRunning, attackRunning = false, false
+
+local fov = Drawing.new("Circle")
+fov.Thickness = 1.5
+fov.Color = Color3.fromRGB(255, 60, 60)
+fov.Filled = false
+fov.Radius = C.Fov
+fov.Position = Cam.ViewportSize / 2
+fov.Visible = false
+
+local line2D = Drawing.new("Line")
+line2D.Thickness = 1.5
+line2D.Color = C.TracerColor
+line2D.Transparency = 1
+line2D.Visible = false
+
+local TOOL_HAMMER = "Carpenter's Hammer"
+
+local function getGun()
+    local ch = LP.Character
+    if ch then
+        local t = ch:FindFirstChild(C.Gun)
+        if t then return t end
+    end
+    local bp = LP:FindFirstChild("Backpack")
+    if bp then return bp:FindFirstChild(C.Gun) end
+end
+
+local function ensureGun()
+    local g = getGun()
+    if not g then return nil end
+    if g.Parent ~= LP.Character then
+        g.Parent = LP.Character
+        task.wait()
+    end
+    return g
+end
+
+local function getHammer()
+    local ch = LP.Character
+    if ch then
+        local t = ch:FindFirstChild(TOOL_HAMMER)
+        if t then return t end
+    end
+    local bp = LP:FindFirstChild("Backpack")
+    if bp then return bp:FindFirstChild(TOOL_HAMMER) end
+end
+
+local function isMate(p)
+    if not C.Team then return false end
+    if not LP.Team or not p.Team then return false end
+    return p.Team == LP.Team
+end
+
+local function aim(ch)
+    return ch:FindFirstChild("Head") or ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart
+end
+
+local function list()
+    local r = {}
+    if C.Plr then
+        for _, p in ipairs(P:GetPlayers()) do
+            if p ~= LP and p.Character and not isMate(p) then
+                local h = p.Character:FindFirstChildOfClass("Humanoid")
+                local a = aim(p.Character)
+                if a and h and h.Health > 0 then
+                    table.insert(r, { part = a, char = p.Character })
+                end
+            end
+        end
+    end
+    if C.Npc then
+        for _, o in ipairs(W:GetDescendants()) do
+            if o:IsA("Model") and o ~= LP.Character and not P:GetPlayerFromCharacter(o) then
+                local h = o:FindFirstChildOfClass("Humanoid")
+                if h and h.Health > 0 then
+                    local a = aim(o)
+                    if a then table.insert(r, { part = a, char = o }) end
+                end
+            end
+        end
+    end
+    return r
+end
+
+local function best()
+    local b, bd = nil, math.huge
+    local ctr = Cam.ViewportSize / 2
+    local ch = LP.Character
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+    for _, t in ipairs(list()) do
+        local d = (t.part.Position - hrp.Position).Magnitude
+        if d <= C.Dist then
+            local sp, on = Cam:WorldToViewportPoint(t.part.Position)
+            if on then
+                local fd = (Vector2.new(sp.X, sp.Y) - ctr).Magnitude
+                if fd <= C.Fov and d < bd then
+                    bd = d
+                    b = t
+                end
+            end
+        end
+    end
+    return b
+end
+
+local function getOrigin(handle, firePoint)
+    if firePoint then
+        if firePoint:IsA("Attachment") then
+            return firePoint.WorldPosition
+        elseif firePoint:IsA("BasePart") then
+            return firePoint.Position
+        end
+    end
+    return handle.Position
+end
+
+local function Create3DTracer(startPos, endPos)
+    if not C.Tracer3D then return end
+    local distance = (startPos - endPos).Magnitude
+    if distance < 1 then return end
+    
+    local tracer = Instance.new("Part")
+    tracer.Name = "RageTracer3D"
+    tracer.Anchored = true
+    tracer.CanCollide = false
+    tracer.CastShadow = false
+    tracer.Material = Enum.Material.Neon
+    tracer.Color = C.TracerColor
+    tracer.Transparency = 0.3
+    tracer.Size = Vector3.new(0.15, 0.15, distance)
+    tracer.CFrame = CFrame.lookAt((startPos + endPos) / 2, endPos)
+    
+    tracer.Parent = workspace
+    Debris:AddItem(tracer, 0.15)
+end
+
+local function fire(t)
+    local g = C.AutoEquip and ensureGun() or getGun()
+    if not g then return false end
+    local h = g:FindFirstChild("Handle")
+    if not h then return false end
+
+    local fp = h:FindFirstChild("GunFirePoint")
+    local mp = h:FindFirstChild("GunMuzzlePoint")
+    local origin = getOrigin(h, fp)
+
+    local diff = t.part.Position - origin
+    if diff.Magnitude < 0.001 then return false end
+    local dir = diff.Unit
+
+    local hitPart = C.ForceHit and t.part or nil
+    local hitPos = C.ForceHit and t.part.Position or nil
+
+    Create3DTracer(origin, t.part.Position)
+
+    pcall(function()
+        VB:FireServer(
+            g, h,
+            hitPart,
+            hitPos,
+            { dir }, fp,
+            { true, {}, 1, 1.5, 0.3, Hit, false },
+            { true, {}, 1, 1, 0.3, Blood },
+            { true, 0.4, {}, false, 9, 1 },
+            { false, 8, true, {}, 1, 1.5, 1, false, Exp, false, true, 3, {}, false, 3, 1 },
+            { "NewBullet", C.Spd, Vector3.new(0, 0, 0), C.Rng, C.Pen, false, 3, 0, 0, 0, 0 },
+            { true, {}, 1, 1, 25, 1 },
+            nil
+        )
+    end)
+
+    if C.Muzzle and VM and mp then
+        pcall(function()
+            VM:FireServer(h, nil, true,
+                { false, 4, Color3.new(1, 1.1098039150238037, 0), 15, true, 0.01 }, Muz, nil)
+        end)
+    end
+
+    if C.Sound and PA and mp then
+        pcall(function()
+            PA:FireServer(
+                { Pitch = 1, MaxDistance = 10000, Volume = 0.25, Silenced = false,
+                  SoundId = "rbxassetid://11403268943", Muzzle = mp, Echo = true, EmitterSize = 70 },
+                { Enabled = false, EmitterSize = 10, CurrentAmmo = 4, Muzzle = mp,
+                  AmmoPerMag = 5, Volume = 0.5, SoundId = "rbxassetid://3032849569",
+                  MaxDistance = 10000, Pitch = 1 },
+                nil)
+        end)
+    end
+
+    shots = shots + 1
+    return true
+end
+
+local function draw(t)
+    if not C.Line2D or not t then
+        line2D.Visible = false
+        return
+    end
+    local sp, on = Cam:WorldToViewportPoint(t.part.Position)
+    if on then
+        line2D.From = Vector2.new(Cam.ViewportSize.X / 2, Cam.ViewportSize.Y)
+        line2D.To = Vector2.new(sp.X, sp.Y)
+        line2D.Color = C.TracerColor
+        line2D.Visible = true
+    else
+        line2D.Visible = false
+    end
+end
+
+local function loop()
+    while C.On do
+        local t = best()
+        tgt = t
+        fov.Position = Cam.ViewportSize / 2
+        fov.Radius = C.Fov
+        fov.Visible = C.Circle and C.On
+        if t then
+            local now = tick()
+            if now - last >= C.Interval then
+                last = now
+                fire(t)
+            end
+        end
+        draw(t)
+        R.RenderStepped:Wait()
+    end
+    fov.Visible = false
+    line2D.Visible = false
+    tgt = nil
+    active = false
+end
+
+local function start()
+    if active then return end
+    active = true
+    task.spawn(loop)
+end
+
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if C.Reload and C.On then
+            local g = getGun()
+            if g then
+                local gs = g:FindFirstChild("GunScript_Server")
+                local cm = gs and gs:FindFirstChild("ChangeMagAndAmmo")
+                if cm then pcall(function() cm:FireServer() end) end
+            end
+        end
+    end
+end)
+
+-- ============ 自动修复建筑 ============
+local repairParams = OverlapParams.new()
+repairParams.FilterType = Enum.RaycastFilterType.Include
+repairParams.MaxParts = 2000
+
+local function isBarricade(part)
+    if not part or not part:IsA("BasePart") then return false end
+    local b = W:FindFirstChild("Barricades")
+    if not b then return false end
+    return part:IsDescendantOf(b)
+end
+
+local function isBroken(part)
+    local hp = part:GetAttribute("Health") or part:GetAttribute("HP")
+    local mx = part:GetAttribute("MaxHealth") or part:GetAttribute("MaxHP")
+    if hp and mx and tonumber(hp) and tonumber(mx) then
+        return tonumber(hp) < tonumber(mx)
+    end
+    return true
+end
+
+local function repairOne(tool, part, hrpPos)
+    local diff = part.Position - hrpPos
+    local dir = diff.Magnitude > 0.001 and diff.Unit or Vector3.new(0, 0, 1)
+    local cf = CFrame.lookAt(part.Position, part.Position + dir)
+    pcall(function() Repair:FireServer(tool, part, cf, C.RepairAmt) end)
+    repairStats.n = repairStats.n + 1
+    if C.RepairVisual and VH then
+        local h = tool:FindFirstChild("Handle") or tool
+        pcall(function()
+            VH:FireServer(tool, h, part, part.Position, -dir, part.Material,
+                { true, {}, 1, 1, 0.3, Hit, false },
+                { true, {}, 1, 1, 0.3, Blood },
+                { true, 0.5, {}, false, 3, 1 }, nil)
+        end)
+    end
+end
+
+local function repairLoop()
+    while C.RepairOn do
+        local tool = getHammer()
+        local char = LP.Character
+        local hrp = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+        local bar = W:FindFirstChild("Barricades")
+        if tool and hrp and bar then
+            repairParams.FilterDescendantsInstances = {bar}
+            local parts = W:GetPartBoundsInRadius(hrp.Position, C.RepairRange, repairParams)
+            repairStats.parts = #parts
+            local n = 0
+            for _, p in ipairs(parts) do
+                if n >= C.RepairMax or not C.RepairOn then break end
+                if isBarricade(p) and (not C.RepairOnlyBroken or isBroken(p)) then
+                    repairOne(tool, p, hrp.Position)
+                    n = n + 1
+                end
+            end
+        end
+        if C.RepairCd > 0 then task.wait(C.RepairCd) else R.RenderStepped:Wait() end
+    end
+    repairRunning = false
+end
+
+local function startRepair()
+    if repairRunning then return end
+    repairRunning = true
+    task.spawn(repairLoop)
+end
+
+-- ============ 僵尸精准拆除路障 ============
+local function getZombie()
+    local ch = LP.Character
+    if not ch then return nil end
+    local z = ch:FindFirstChild("Zombie")
+    if not z then return nil end
+    local h = z:FindFirstChild("Handle") or z:FindFirstChildWhichIsA("BasePart")
+    local hrp = ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart
+    return z, h, hrp
+end
+
+local attackParams = OverlapParams.new()
+attackParams.FilterType = Enum.RaycastFilterType.Include -- 仅包含指定文件夹
+attackParams.MaxParts = 500
+
+local function attackLoop()
+    local z, h, hrp = getZombie()
+    if C.MuteMoan and z then
+        local ms = z:FindFirstChild("MeleeScript_Server")
+        if ms then
+            local moan = ms:FindFirstChild("SoundMoan")
+            local snd = ms:FindFirstChild("Sound")
+            if moan then pcall(function() moan:FireServer("OFF") end) end
+            if snd then pcall(function() snd:FireServer(true) end) end
+        end
+    end
+
+    while C.AttackOn do
+        local z, h, hrp = getZombie()
+        local bar = W:FindFirstChild("Barricades")
+        
+        if z and hrp and bar and DamagedBarricade then
+            -- 严格只搜索 Barricades 文件夹里的路障
+            attackParams.FilterDescendantsInstances = {bar}
+            local parts = W:GetPartBoundsInRadius(hrp.Position, C.AttackRange, attackParams)
+            
+            -- 过滤出真正的实体部件
+            local validParts = {}
+            for _, p in ipairs(parts) do
+                if p:IsA("BasePart") then
+                    -- 智能检测血量（如果路障已经碎了就不浪费时间发了）
+                    local hp = p:GetAttribute("Health") or p:GetAttribute("HP") or p:GetAttribute("Durability")
+                    if hp == nil or tonumber(hp) > 0 then
+                        table.insert(validParts, p)
+                    end
+                end
+            end
+            
+            -- 按距离排序，优先打离得最近的
+            table.sort(validParts, function(a, b)
+                return (a.Position - hrp.Position).Magnitude < (b.Position - hrp.Position).Magnitude
+            end)
+
+            local n = 0
+            for _, p in ipairs(validParts) do
+                if n >= C.AttackMax or not C.AttackOn then break end
+                
+                local diff = p.Position - hrp.Position
+                local dir = diff.Magnitude > 0.001 and diff.Unit or Vector3.new(1, 0, 0)
+                
+                -- 发送真实伤害事件（参数完全对齐抓包）
+                pcall(function()
+                    DamagedBarricade:FireServer(z, p, p.CFrame, C.AttackForce, 1.2)
+                end)
+                
+                -- 播放击中特效
+                if C.AttackVisual and VH then
+                    pcall(function()
+                        VH:FireServer(z, h, p, p.Position, -dir, p.Material,
+                            { true, {}, 1, 1, 0.3, Hit, false },
+                            { true, {}, 1, 1, 0.3, Blood },
+                            { true, 0.5, {}, false, 3, 1 }, true)
+                    end)
+                end
+                
+                attackStats.n = attackStats.n + 1
+                n = n + 1
+            end
+        end
+        -- 限制频率防延迟爆炸
+        if C.AttackCd > 0 then task.wait(C.AttackCd) else task.wait(0.05) end
+    end
+    attackRunning = false
+end
+
+local function startAttack()
+    if attackRunning then return end
+    attackRunning = true
+    task.spawn(attackLoop)
+end
+
+local Window = WindUI:CreateWindow({
+    Title = "idknamegg",
+    Icon = "crosshair",
+    Author = "idknamegg",
+    Folder = "idknamegg",
+    Size = UDim2.fromOffset(700, 520),
+    Theme = "Dark",
+    User = { Enabled = false, Callback = function() end },
+    SideBarWidth = 220,
+    ScrollBarEnabled = true
+})
+
+Window:Tag({ Title = "1.9", Color = Color3.fromHex("#ff3b30") })
+
+local T1 = Window:Tab({ Title = "主功能", Icon = "crosshair", Locked = false })
+T1:Section({ Title = "开关", TextXAlignment = "Left", TextSize = 17 })
+
+T1:Toggle({
+    Title = "启用 Ragebot",
+    Desc = "自动锁定最近目标并高速射击",
+    Type = "Checkbox", Default = false,
+    Callback = function(state)
+        C.On = state
+        if state then
+            local g = getGun()
+            if not g then
+                WindUI:Notify({ Title = "警告", Content = "背包中未找到 " .. C.Gun, Icon = "alert-triangle", Duration = 4 })
+            end
+            start()
+            WindUI:Notify({ Title = "已开启", Content = "Ragebot 运行中", Icon = "check", Duration = 2 })
+        else
+            WindUI:Notify({ Title = "已关闭", Content = "Ragebot 已停止", Icon = "x", Duration = 2 })
+        end
+    end
+})
+
+T1:Toggle({ Title = "自动换弹", Desc = "每 0.5 秒补满弹匣", Type = "Checkbox", Default = true,
+    Callback = function(v) C.Reload = v end })
+T1:Toggle({ Title = "显示 FOV 圆圈", Type = "Checkbox", Default = true,
+    Callback = function(v) C.Circle = v end })
+
+T1:Section({ Title = "Rage 射线", TextXAlignment = "Left", TextSize = 17 })
+T1:Toggle({ Title = "3D 枪口霓虹射线", Desc = "开火时从枪口射出光束", Type = "Checkbox", Default = true,
+    Callback = function(v) C.Tracer3D = v end })
+T1:Toggle({ Title = "2D 屏幕连线", Desc = "屏幕底部连向目标头部", Type = "Checkbox", Default = true,
+    Callback = function(v) C.Line2D = v end })
+T1:Dropdown({ Title = "射线颜色",
+    Values = { "红色", "绿色", "蓝色", "粉色", "黄色" },
+    Value = "红色", Multi = false,
+    Callback = function(v) 
+        if v == "红色" then C.TracerColor = Color3.fromRGB(255, 50, 50)
+        elseif v == "绿色" then C.TracerColor = Color3.fromRGB(50, 255, 50)
+        elseif v == "蓝色" then C.TracerColor = Color3.fromRGB(50, 150, 255)
+        elseif v == "粉色" then C.TracerColor = Color3.fromRGB(255, 105, 180)
+        elseif v == "黄色" then C.TracerColor = Color3.fromRGB(255, 255, 50)
+        end
+        fov.Color = C.TracerColor
+    end
+})
+
+T1:Section({ Title = "防封关键项", TextXAlignment = "Left", TextSize = 17 })
+T1:Toggle({
+    Title = "自动装备武器",
+    Desc = "建议开启，工具必须在手上才能正确计算枪口位置",
+    Type = "Checkbox", Default = true,
+    Callback = function(v) C.AutoEquip = v end
+})
+T1:Toggle({
+    Title = "强制命中",
+    Desc = "建议开启，把目标部件传给服务端才能造成伤害",
+    Type = "Checkbox", Default = true,
+    Callback = function(v) C.ForceHit = v end
+})
+
+T1:Section({ Title = "目标", TextXAlignment = "Left", TextSize = 17 })
+T1:Toggle({ Title = "攻击玩家", Type = "Checkbox", Default = true,
+    Callback = function(v) C.Plr = v end })
+T1:Toggle({ Title = "攻击 NPC", Type = "Checkbox", Default = true,
+    Callback = function(v) C.Npc = v end })
+T1:Toggle({ Title = "队伍检测（忽略队友）", Type = "Checkbox", Default = true,
+    Callback = function(v) C.Team = v end })
+
+T1:Section({ Title = "参数", TextXAlignment = "Left", TextSize = 17 })
+T1:Slider({ Title = "FOV 范围", Step = 10, Value = { Min = 50, Max = 1000, Default = 400 },
+    Callback = function(v) C.Fov = v end })
+T1:Slider({ Title = "最大距离", Step = 50, Value = { Min = 100, Max = 5000, Default = 2000 },
+    Callback = function(v) C.Dist = v end })
+T1:Slider({
+    Title = "射击间隔（秒）",
+    Desc = "0.1 = 每秒 10 发；0.05 = 20 发；0.2 = 5 发",
+    Step = 0.01,
+    Value = { Min = 0.01, Max = 1, Default = 0.05 },
+    Callback = function(v) C.Interval = v end
+})
+
+local T2 = Window:Tab({ Title = "子弹与武器", Icon = "crosshair", Locked = false })
+T2:Section({ Title = "武器", TextXAlignment = "Left", TextSize = 17 })
+T2:Dropdown({ Title = "当前武器", Values = { "SSG", "USP" }, Value = "SSG", Multi = false,
+    Callback = function(v) C.Gun = v end })
+
+T2:Section({ Title = "子弹参数", TextXAlignment = "Left", TextSize = 17 })
+T2:Slider({ Title = "子弹速度", Step = 500, Value = { Min = 1000, Max = 100000, Default = 99999 },
+    Callback = function(v) C.Spd = v end })
+T2:Slider({ Title = "射程 / 伤害系数", Step = 500, Value = { Min = 1000, Max = 100000, Default = 99999 },
+    Callback = function(v) C.Rng = v end })
+T2:Dropdown({ Title = "穿透类型",
+    Values = { "HumanoidPenetration", "WallPenetration", "All", "None" },
+    Value = "HumanoidPenetration", Multi = false,
+    Callback = function(v) C.Pen = v end })
+
+local T3 = Window:Tab({ Title = "特效", Icon = "sparkles", Locked = false })
+T3:Section({ Title = "视觉与音效", TextXAlignment = "Left", TextSize = 17 })
+T3:Toggle({ Title = "枪口特效", Desc = "发送 VisualizeMuzzle", Type = "Checkbox", Default = true,
+    Callback = function(v) C.Muzzle = v end })
+T3:Toggle({ Title = "开火音效", Desc = "发送 PlayAudio", Type = "Checkbox", Default = true,
+    Callback = function(v) C.Sound = v end })
+
+local T4 = Window:Tab({ Title = "人类功能", Icon = "user", Locked = false })
+
+T4:Section({ Title = "自动修复建筑", TextXAlignment = "Left", TextSize = 17 })
+
+T4:Toggle({
+    Title = "启用自动修复",
+    Desc = "无需手持 Carpenter's Hammer，从背包引用即可",
+    Type = "Checkbox", Default = false,
+    Callback = function(state)
+        C.RepairOn = state
+        if state then
+            if not getHammer() then
+                WindUI:Notify({ Title = "警告", Content = "背包中未找到 Carpenter's Hammer", Icon = "alert-triangle", Duration = 4 })
+            end
+            startRepair()
+            WindUI:Notify({ Title = "修复已开启", Icon = "check", Duration = 2 })
+        else
+            WindUI:Notify({ Title = "修复已关闭", Icon = "x", Duration = 2 })
+        end
+    end
+})
+
+T4:Toggle({ Title = "修复时播放特效", Type = "Checkbox", Default = false,
+    Callback = function(v) C.RepairVisual = v end })
+T4:Toggle({ Title = "只修复已损坏建筑", Type = "Checkbox", Default = false,
+    Callback = function(v) C.RepairOnlyBroken = v end })
+
+T4:Slider({ Title = "修复量", Step = 1, Value = { Min = 1, Max = 500, Default = 10 },
+    Callback = function(v) C.RepairAmt = v end })
+T4:Slider({ Title = "修复范围", Step = 10, Value = { Min = 10, Max = 2000, Default = 200 },
+    Callback = function(v) C.RepairRange = v end })
+T4:Slider({ Title = "修复间隔（秒，0=每帧）", Step = 0.01, Value = { Min = 0, Max = 1, Default = 0 },
+    Callback = function(v) C.RepairCd = v end })
+T4:Slider({ Title = "每帧最多修复数", Step = 1, Value = { Min = 1, Max = 500, Default = 80 },
+    Callback = function(v) C.RepairMax = v end })
+
+T4:Section({ Title = "僵尸路障拆除 (精准打击)", TextXAlignment = "Left", TextSize = 17 })
+
+T4:Toggle({
+    Title = "启用僵尸拆路障",
+    Desc = "仅攻击 workspace.Barricades 内的路障，使用真实伤害事件",
+    Type = "Checkbox", Default = false,
+    Callback = function(state)
+        C.AttackOn = state
+        if state then
+            if not getZombie() then
+                WindUI:Notify({ Title = "警告", Content = "角色身上未找到 Zombie 模型", Icon = "alert-triangle", Duration = 4 })
+            end
+            if not DamagedBarricade then
+                WindUI:Notify({ Title = "警告", Content = "未找到 DamagedBarricade 事件", Icon = "alert-triangle", Duration = 4 })
+            end
+            startAttack()
+            WindUI:Notify({ Title = "拆路障已开启", Content = "正在摧毁周围路障...", Icon = "check", Duration = 2 })
+        else
+            WindUI:Notify({ Title = "拆路障已关闭", Icon = "x", Duration = 2 })
+        end
+    end
+})
+
+T4:Toggle({ Title = "关闭僵尸呻吟声", Desc = "防止耳朵被吵聋", Type = "Checkbox", Default = true,
+    Callback = function(v) C.MuteMoan = v end })
+
+T4:Toggle({ Title = "拆除时播放特效", Type = "Checkbox", Default = false,
+    Callback = function(v) C.AttackVisual = v end })
+
+T4:Slider({ Title = "单次伤害力度 (Force)", Step = 1, Value = { Min = 1, Max = 500, Default = 35 },
+    Callback = function(v) C.AttackForce = v end })
+T4:Slider({ Title = "拆除范围 (Studs)", Step = 10, Value = { Min = 10, Max = 500, Default = 150 },
+    Callback = function(v) C.AttackRange = v end })
+T4:Slider({ Title = "每次循环拆多少个", Step = 1, Value = { Min = 1, Max = 50, Default = 15 },
+    Callback = function(v) C.AttackMax = v end })
+T4:Slider({ Title = "循环间隔（秒，防延迟）", Step = 0.01, Value = { Min = 0.01, Max = 1, Default = 0.05 },
+    Callback = function(v) C.AttackCd = v end })
+
+local T5 = Window:Tab({ Title = "状态", Icon = "info", Locked = false })
+T5:Section({ Title = "统计", TextXAlignment = "Left", TextSize = 17 })
+
+T5:Paragraph({
+    Title = "运行信息",
+    Image = "info", ImageSize = 20, Color = "Grey",
+    Buttons = {
+        {
+            Title = "查看状态", Icon = "info", Variant = "Tertiary",
+            Callback = function()
+                local n = tgt and tgt.char.Name or "无"
+                local equipped = getGun() and getGun().Parent == LP.Character and "手持" or "背包"
+                WindUI:Notify({
+                    Title = "运行状态",
+                    Content = string.format(
+                        "武器: %s [%s] | 射击: %d 发 | 目标: %s\n修复: %d 次 | 拆路障: %d 次",
+                        C.Gun, equipped, shots, n, repairStats.n, attackStats.n),
+                    Duration = 6
+                })
+            end
+        },
+        {
+            Title = "重置统计", Icon = "refresh-cw", Variant = "Tertiary",
+            Callback = function()
+                shots = 0; repairStats.n = 0; repairStats.parts = 0
+                attackStats.n = 0
+                WindUI:Notify({ Title = "已重置", Duration = 2 })
+            end
+        }
+    }
+})
+
+WindUI:Notify({ Title = "加载完成", Content = "idknamegg 僵尸精准拆路障版", Icon = "check", Duration = 3 })
