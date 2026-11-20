@@ -1,0 +1,1072 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local Workspace = workspace
+
+local function findClosestPlayer()
+    local closestDistance = math.huge
+    local closestPlayer = nil
+    local character = LocalPlayer.Character
+
+    if not (character and character:FindFirstChild("HumanoidRootPart")) then
+        return nil
+    end
+
+    local hrp = character.HumanoidRootPart
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local targetChar = player.Character
+            if targetChar then
+                local targetHRP = targetChar:FindFirstChild("HumanoidRootPart")
+                local humanoid = targetChar:FindFirstChildOfClass("Humanoid")
+                if targetHRP and humanoid and humanoid.Health > 0 then
+                    local distance = (hrp.Position - targetHRP.Position).Magnitude
+                    if distance < closestDistance then
+                        closestDistance = distance
+                        closestPlayer = player
+                    end
+                end
+            end
+        end
+    end
+    return closestPlayer
+end
+
+local function facePlayer(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then
+        return false
+    end
+
+    local targetHRP = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local localHRP = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+    if targetHRP and localHRP then
+        local lookAt = (targetHRP.Position - localHRP.Position)
+        lookAt = Vector3.new(lookAt.X, 0, lookAt.Z)
+        if lookAt.Magnitude > 0.1 then
+            localHRP.CFrame = CFrame.lookAt(localHRP.Position, localHRP.Position + lookAt)
+            return true
+        end
+    end
+    return false
+end
+
+local function faceClosestPlayer()
+    local target = findClosestPlayer()
+    if target and facePlayer(target) then
+        return target
+    end
+    return nil
+end
+
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+WindUI.TransparencyValue = 0.2
+WindUI:SetTheme("Dark")
+
+local AttackEvent
+local RollEvent
+local PlayEmoteEvent
+do
+    local function safeGet(name)
+        local ok, res = pcall(function()
+            return ReplicatedStorage.Remotes:WaitForChild(name, 5)
+        end)
+        return ok and res or nil
+    end
+    AttackEvent = safeGet("Attack")
+    RollEvent = safeGet("RollAttack")
+    PlayEmoteEvent = safeGet("PlayEmote")
+end
+
+local baseVariants = {
+    { a = 23,  b = 2 },
+    { a = 21,  b = 1 },
+    { a = nil, b = nil },
+    { a = 18,  b = 1 },
+    { a = 60,  b = 1 },
+    { a = 60,  b = 1 },
+    { a = 59,  b = 1 },
+    { a = 58,  b = 1 },
+    { a = 56,  b = 1 },
+    { a = 50,  b = 1 },
+    { a = nil, b = nil },
+}
+
+local fixedPositions = {
+    Vector3.new(294.4613037109375, 3.1000022888183594, -76.868804931640625),
+    Vector3.new(288.3511962890625, 3.3000044822692871, -63.962482452392578),
+    Vector3.new(290.72994995117188, 3.3000006675720215, -33.819629669189453),
+    Vector3.new(286.15121459960938, 3.2999968528747559, -57.708065032958984),
+    Vector3.new(299.1136474609375, 3.3000006675720215, 12.372879981994629),
+    Vector3.new(299.1136474609375, 3.3000006675720215, 12.372879981994629),
+    Vector3.new(303.06185913085938, 3.3000006675720215, 45.130813598632812),
+    Vector3.new(267.9217529296875, 3.3000006675720215, 16.614402770996094),
+    Vector3.new(294.67434692382812, 3.2999968528747559, 20.683048248291016),
+    Vector3.new(-305.96493530273438, 21.254415512084961, 736.31005859375),
+    Vector3.new(-305.96493530273438, 21.254415512084961, 736.31005859375),
+}
+
+local damageValue = 100
+local damageSlot = "第三参数"
+local attackVariants = {}
+
+local scanRange = 20
+local shotInterval = 0.01
+local roundDelay = 0.05
+local targetMode = "仅玩家"
+local posMode = "目标坐标"
+local removeAnim = true
+local lockFacing = true
+local enabled = false
+local faceThread = nil
+local attackThread = nil
+local statsThread = nil
+local savedAutoRotate = nil
+local lastLockTime = 0
+local animConn = nil
+local LOCK_VALID_TIME = 0.2
+
+local variantCount = {}
+local lastSentIndex = 0
+local totalSent = 0
+local lastTargetName = "无"
+
+local jumpTpEnabled = false
+local jumpTpDist = 3.0
+local jumpTpCooldown = 0.2
+local jumpTpThread = nil
+local jumpTpLastTime = 0
+local jumpTpCount = 0
+local jumpTpLastHitting = "无"
+
+local rollEnabled = false
+local rollWorkers = 1
+local rollDelay = 0.05
+local rollCount = 0
+local rollSuccess = 0
+local rollThreads = {}
+
+local emoteEnabled = false
+local emoteThread = nil
+local emoteDelay = 0.5
+local emoteName = "Bored"
+local emoteCancel = false
+local emoteCount = 0
+
+local statsLabel
+local infoLabel
+local startAttack
+local stopAttack
+
+local function rebuildVariants()
+    attackVariants = {}
+    for i, v in ipairs(baseVariants) do
+        local a, b = v.a, v.b
+        if i <= 5 then
+            if damageSlot == "第二参数" then
+                a = damageValue
+            elseif damageSlot == "第三参数" then
+                b = damageValue
+            else
+                a = damageValue
+                b = damageValue
+            end
+        end
+        attackVariants[i] = { a = a, b = b }
+    end
+    variantCount = {}
+    for i = 1, #attackVariants do
+        variantCount[i] = 0
+    end
+end
+
+local function buildInfoText()
+    local lines = {}
+    table.insert(lines, "【攻击参数】")
+    for i, v in ipairs(attackVariants) do
+        local p = fixedPositions[i]
+        local mark = (i == lastSentIndex) and "  ←最近" or ""
+        table.insert(lines, string.format(
+            "%d) a=%s  b=%s  ×%d%s\n    pos=(%.1f, %.1f, %.1f)",
+            i, tostring(v.a), tostring(v.b), variantCount[i] or 0, mark,
+            p and p.X or 0, p and p.Y or 0, p and p.Z or 0
+        ))
+    end
+
+    table.insert(lines, "")
+    table.insert(lines, "【当前设置】")
+    table.insert(lines, "运行状态: " .. (enabled and "开启" or "关闭"))
+    table.insert(lines, "目标类型: " .. targetMode)
+    table.insert(lines, "坐标来源: " .. posMode)
+    table.insert(lines, "最近目标: " .. lastTargetName)
+    table.insert(lines, string.format("攻击范围: %.1f", scanRange))
+    table.insert(lines, string.format("单发间隔: %.3f 秒", shotInterval))
+    table.insert(lines, string.format("每轮间隔: %.3f 秒", roundDelay))
+    table.insert(lines, "伤害写入: " .. damageSlot .. " 值=" .. tostring(damageValue))
+    table.insert(lines, "朝向方式: 最近玩家优先(内置)")
+    table.insert(lines, "锁定朝向: " .. (lockFacing and "开" or "关"))
+    table.insert(lines, "去除动画: " .. (removeAnim and "开" or "关"))
+    table.insert(lines, "表情取消: " .. (emoteCancel and "开" or "关") .. "（" .. emoteName .. "）")
+
+    table.insert(lines, "")
+    table.insert(lines, "【跳人瞬移】")
+    table.insert(lines, "状态: " .. (jumpTpEnabled and "开启" or "关闭"))
+    table.insert(lines, string.format("瞬移距离: %.2f（身前）", jumpTpDist))
+    table.insert(lines, string.format("冷却: %.2f 秒", jumpTpCooldown))
+    table.insert(lines, "触发次数: " .. tostring(jumpTpCount))
+    table.insert(lines, "最近跳人: " .. jumpTpLastHitting)
+
+    table.insert(lines, "")
+    table.insert(lines, "【发送统计】")
+    table.insert(lines, "总计发送: " .. tostring(totalSent))
+    return table.concat(lines, "\n")
+end
+
+local function refreshInfo()
+    if not infoLabel then return end
+    pcall(function()
+        infoLabel:SetTitle(buildInfoText())
+    end)
+end
+
+rebuildVariants()
+
+local function isValidTarget(model)
+    if not model then return false end
+    if model == LocalPlayer.Character then return false end
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+
+    local isPlayer = Players:GetPlayerFromCharacter(model) ~= nil
+    if isPlayer then
+        return targetMode == "仅玩家" or targetMode == "玩家和NPC"
+    else
+        return targetMode == "仅NPC" or targetMode == "玩家和NPC"
+    end
+end
+
+local function getRoot()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function getNearestTarget(root)
+    if not root then return nil end
+    local bestRoot, bestHum, bestModel, minDist = nil, nil, nil, scanRange
+    local parts = Workspace:GetPartBoundsInRadius(root.Position, scanRange)
+    for _, part in ipairs(parts) do
+        local model = part:FindFirstAncestorOfClass("Model")
+        if model and isValidTarget(model) then
+            local targetRoot = model:FindFirstChild("HumanoidRootPart")
+            local hum = model:FindFirstChildOfClass("Humanoid")
+            if targetRoot and hum then
+                local dist = (root.Position - targetRoot.Position).Magnitude
+                if dist < minDist then
+                    minDist = dist
+                    bestRoot = targetRoot
+                    bestHum = hum
+                    bestModel = model
+                end
+            end
+        end
+    end
+    return bestRoot, bestHum, bestModel
+end
+
+local function killAnimations()
+    local char = LocalPlayer.Character
+    if not char then return end
+
+    local animate = char:FindFirstChild("Animate")
+    if animate and animate:IsA("BaseScript") then
+        animate.Disabled = true
+    end
+
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+
+    for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
+        track:Stop(0)
+    end
+
+    if not animConn then
+        local animator = hum:FindFirstChildOfClass("Animator")
+        if animator then
+            animConn = animator.AnimationPlayed:Connect(function(track)
+                if removeAnim then
+                    track:Stop(0)
+                end
+            end)
+        end
+    end
+end
+
+local function restoreAnimations()
+    if animConn then
+        animConn:Disconnect()
+        animConn = nil
+    end
+    local char = LocalPlayer.Character
+    local animate = char and char:FindFirstChild("Animate")
+    if animate and animate:IsA("BaseScript") then
+        animate.Disabled = false
+    end
+end
+
+local function faceTarget()
+    local root = getRoot()
+    if not root then return false end
+
+    local targetRoot, _, targetModel = getNearestTarget(root)
+    if not targetRoot then return false end
+
+    root.CFrame = CFrame.lookAt(root.Position, Vector3.new(
+        targetRoot.Position.X,
+        root.Position.Y,
+        targetRoot.Position.Z
+    ))
+
+    if targetModel then
+        lastTargetName = targetModel.Name
+    end
+    return true
+end
+
+local function tryFace()
+    local player = faceClosestPlayer()
+    if player then
+        lastTargetName = player.Name
+        return true
+    end
+    return faceTarget()
+end
+
+local function isLocked()
+    return (os.clock() - lastLockTime) <= LOCK_VALID_TIME
+end
+
+local function waitForFace()
+    while enabled do
+        if isLocked() then return true end
+        if tryFace() then
+            lastLockTime = os.clock()
+            return true
+        end
+        task.wait(0.01)
+    end
+    return false
+end
+
+local function getJumpingPlayer(root)
+    local bestModel, minDist = nil, scanRange
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local char = plr.Character
+            if char and char ~= LocalPlayer.Character then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                local targetRoot = char:FindFirstChild("HumanoidRootPart")
+                if hum and hum.Health > 0 and targetRoot then
+                    local dist = (root.Position - targetRoot.Position).Magnitude
+                    if dist <= minDist then
+                        local state = hum:GetState()
+                        local vy = targetRoot.AssemblyLinearVelocity.Y
+                        local airborne =
+                            state == Enum.HumanoidStateType.Jumping
+                            or state == Enum.HumanoidStateType.Freefall
+                            or state == Enum.HumanoidStateType.FallingDown
+                            or math.abs(vy) > 2
+                        if airborne then
+                            minDist = dist
+                            bestModel = char
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return bestModel
+end
+
+local function teleportToFront(model)
+    local root = getRoot()
+    local targetRoot = model and model:FindFirstChild("HumanoidRootPart")
+    if not (root and targetRoot) then return false end
+
+    local newPos = (targetRoot.CFrame * CFrame.new(0, 0, -jumpTpDist)).Position
+    root.CFrame = CFrame.lookAt(newPos, Vector3.new(
+        targetRoot.Position.X,
+        newPos.Y,
+        targetRoot.Position.Z
+    ))
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+
+    lastTargetName = model.Name
+    jumpTpLastHitting = model.Name
+    lastLockTime = os.clock()
+    return true
+end
+
+local function stopJumpTp()
+    jumpTpEnabled = false
+    if jumpTpThread then
+        task.cancel(jumpTpThread)
+        jumpTpThread = nil
+    end
+end
+
+local function startJumpTp()
+    stopJumpTp()
+    jumpTpEnabled = true
+    jumpTpLastTime = 0
+
+    jumpTpThread = task.spawn(function()
+        while jumpTpEnabled do
+            local root = getRoot()
+            if root then
+                local now = os.clock()
+                if now - jumpTpLastTime >= jumpTpCooldown then
+                    local model = getJumpingPlayer(root)
+                    if model then
+                        if teleportToFront(model) then
+                            jumpTpLastTime = now
+                            jumpTpCount = jumpTpCount + 1
+                        end
+                    end
+                end
+            end
+            RunService.RenderStepped:Wait()
+        end
+        jumpTpThread = nil
+    end)
+end
+
+local function playEmote(name)
+    if not PlayEmoteEvent then return false end
+    local ok = pcall(function()
+        PlayEmoteEvent:FireServer(name)
+    end)
+    if ok then
+        emoteCount = emoteCount + 1
+    end
+    return ok
+end
+
+local function cancelByEmote()
+    if not emoteCancel then return end
+    playEmote(emoteName)
+end
+
+local function fireBurst()
+    local root = getRoot()
+    if not root then return false end
+    if not AttackEvent then return false end
+    if not waitForFace() then return false end
+
+    for i, variant in ipairs(attackVariants) do
+        if not enabled then return false end
+
+        local targetRoot = getNearestTarget(root)
+        local pos
+        if posMode == "目标坐标" then
+            pos = targetRoot and targetRoot.Position or root.Position
+        elseif posMode == "自身坐标" then
+            pos = root.Position
+        else
+            pos = fixedPositions[i] or root.Position
+        end
+
+        pcall(function()
+            AttackEvent:FireServer(pos, variant.a, variant.b)
+        end)
+
+        variantCount[i] = (variantCount[i] or 0) + 1
+        lastSentIndex = i
+        totalSent = totalSent + 1
+
+        cancelByEmote()
+
+        if shotInterval > 0 then
+            task.wait(shotInterval)
+        end
+    end
+    return true
+end
+
+local function updateStats()
+    if statsLabel then
+        local lines = {}
+        for i, v in ipairs(attackVariants) do
+            local mark = (i == lastSentIndex) and " <<<" or ""
+            table.insert(lines, string.format("%d) a=%s b=%s  ×%d%s", i, tostring(v.a), tostring(v.b), variantCount[i] or 0, mark))
+        end
+        table.insert(lines, string.format("总计发送 %d 次", totalSent))
+        pcall(function()
+            statsLabel:SetTitle(table.concat(lines, "\n"))
+        end)
+    end
+    refreshInfo()
+end
+
+stopAttack = function()
+    enabled = false
+    if faceThread then
+        task.cancel(faceThread)
+        faceThread = nil
+    end
+    if attackThread then
+        task.cancel(attackThread)
+        attackThread = nil
+    end
+    if statsThread then
+        task.cancel(statsThread)
+        statsThread = nil
+    end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum and savedAutoRotate ~= nil then
+        hum.AutoRotate = savedAutoRotate
+        savedAutoRotate = nil
+    end
+    lastLockTime = 0
+    updateStats()
+end
+
+startAttack = function()
+    if not AttackEvent then
+        WindUI:Notify({ Title = "错误", Content = "未找到 Remotes.Attack", Icon = "x", Duration = 2 })
+        return false
+    end
+    stopAttack()
+    enabled = true
+
+    for i = 1, #attackVariants do
+        variantCount[i] = 0
+    end
+    totalSent = 0
+    lastSentIndex = 0
+
+    if lockFacing then
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            savedAutoRotate = hum.AutoRotate
+            hum.AutoRotate = false
+        end
+        if removeAnim then
+            killAnimations()
+        end
+    end
+
+    faceThread = task.spawn(function()
+        while enabled do
+            if tryFace() then
+                lastLockTime = os.clock()
+            end
+            RunService.RenderStepped:Wait()
+        end
+        faceThread = nil
+    end)
+
+    attackThread = task.spawn(function()
+        while enabled do
+            local ok = fireBurst()
+            if ok then
+                task.wait(roundDelay)
+            else
+                task.wait(0.1)
+            end
+        end
+        attackThread = nil
+    end)
+
+    statsThread = task.spawn(function()
+        while enabled do
+            updateStats()
+            task.wait(0.5)
+        end
+        statsThread = nil
+    end)
+
+    return true
+end
+
+local function rollOnce()
+    if not RollEvent then return false end
+    local ok = pcall(function()
+        RollEvent:InvokeServer()
+    end)
+    rollCount = rollCount + 1
+    if ok then
+        rollSuccess = rollSuccess + 1
+    end
+    return ok
+end
+
+local function stopRoll()
+    rollEnabled = false
+    for i = #rollThreads, 1, -1 do
+        task.cancel(rollThreads[i])
+        rollThreads[i] = nil
+    end
+end
+
+local function startRoll()
+    if not RollEvent then
+        WindUI:Notify({ Title = "错误", Content = "未找到 Remotes.RollAttack", Icon = "x", Duration = 2 })
+        return false
+    end
+    stopRoll()
+    rollEnabled = true
+    rollCount = 0
+    rollSuccess = 0
+
+    for _ = 1, math.max(1, rollWorkers) do
+        local thread = task.spawn(function()
+            while rollEnabled do
+                rollOnce()
+                task.wait(rollDelay)
+            end
+        end)
+        table.insert(rollThreads, thread)
+    end
+    return true
+end
+
+local function probeRoll(duration)
+    if not RollEvent then return end
+    duration = duration or 2
+
+    local start = os.clock()
+    local calls, oks = 0, 0
+    local minLat, maxLat, sumLat = math.huge, 0, 0
+    local lastRes
+
+    while os.clock() - start < duration do
+        local t0 = os.clock()
+        local ok, res = pcall(function()
+            return RollEvent:InvokeServer()
+        end)
+        local lat = os.clock() - t0
+
+        calls = calls + 1
+        if ok then oks = oks + 1 end
+        sumLat = sumLat + lat
+        minLat = math.min(minLat, lat)
+        maxLat = math.max(maxLat, lat)
+        lastRes = res
+    end
+
+    local elapsed = os.clock() - start
+    local rate = calls / elapsed
+
+    print(string.format(
+        "调用 %d 次 / 成功 %d 次 / 用时 %.2f 秒 / 速率 %.2f 次/秒 / 延迟 min %.3f max %.3f avg %.3f",
+        calls, oks, elapsed, rate, minLat, maxLat, sumLat / calls
+    ))
+    print("最后一次返回:", tostring(lastRes))
+
+    WindUI:Notify({
+        Title = "冷却探测",
+        Content = string.format("速率 %.2f 次/秒，成功 %d/%d", rate, oks, calls),
+        Duration = 3
+    })
+end
+
+local function stopEmotes()
+    emoteEnabled = false
+    if emoteThread then
+        task.cancel(emoteThread)
+        emoteThread = nil
+    end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
+            track:Stop(0)
+        end
+    end
+end
+
+local function startEmotes()
+    if not PlayEmoteEvent then
+        WindUI:Notify({ Title = "错误", Content = "未找到 Remotes.PlayEmote", Icon = "x", Duration = 2 })
+        return false
+    end
+    stopEmotes()
+    emoteEnabled = true
+    emoteThread = task.spawn(function()
+        while emoteEnabled do
+            playEmote(emoteName)
+            task.wait(emoteDelay)
+        end
+        emoteThread = nil
+    end)
+    return true
+end
+
+local Window = WindUI:CreateWindow({
+    Title = "idk",
+    Icon = "swords",
+    Author = "Demo",
+    Folder = "idk",
+    Size = UDim2.fromOffset(580, 800),
+    Theme = "Dark",
+    SideBarWidth = 180,
+    ScrollBarEnabled = true
+})
+
+local Tab = Window:Tab({ Title = "攻击", Icon = "target", Locked = false })
+
+Tab:Paragraph({
+    Title = "不瞬移，仅持续朝向范围内最近目标并连发",
+    Image = "swords",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+Tab:Dropdown({
+    Title = "伤害写入位置",
+    Values = { "第二参数", "第三参数", "两个都写" },
+    Value = "第三参数",
+    Callback = function(option)
+        damageSlot = option
+        local wasRunning = enabled
+        if wasRunning then stopAttack() end
+        rebuildVariants()
+        updateStats()
+        if wasRunning then startAttack() end
+    end
+})
+
+Tab:Slider({
+    Title = "伤害值",
+    Step = 1,
+    Value = { Min = 1, Max = 500, Default = 100 },
+    Callback = function(val)
+        damageValue = val
+        local wasRunning = enabled
+        if wasRunning then stopAttack() end
+        rebuildVariants()
+        updateStats()
+        if wasRunning then startAttack() end
+    end
+})
+
+statsLabel = Tab:Paragraph({
+    Title = "运行后显示每组参数的发送次数",
+    Image = "activity",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+Tab:Toggle({
+    Title = "锁定朝向(关闭自动旋转)",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        lockFacing = state
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            if state then
+                savedAutoRotate = hum.AutoRotate
+                hum.AutoRotate = false
+            elseif savedAutoRotate ~= nil then
+                hum.AutoRotate = savedAutoRotate
+                savedAutoRotate = nil
+            end
+        end
+    end
+})
+
+Tab:Toggle({
+    Title = "去除攻击动画",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        removeAnim = state
+        if state and enabled then
+            killAnimations()
+        elseif not state then
+            restoreAnimations()
+        end
+    end
+})
+
+Tab:Dropdown({
+    Title = "目标类型",
+    Values = { "仅玩家", "仅NPC", "玩家和NPC" },
+    Value = "仅玩家",
+    Callback = function(option)
+        targetMode = option
+    end
+})
+
+Tab:Dropdown({
+    Title = "坐标来源",
+    Values = { "目标坐标", "自身坐标", "固定坐标" },
+    Value = "目标坐标",
+    Callback = function(option)
+        posMode = option
+    end
+})
+
+Tab:Toggle({
+    Title = "跳人瞬移(传到他前面)",
+    Type = "Checkbox",
+    Default = false,
+    Callback = function(state)
+        if state then
+            startJumpTp()
+        else
+            stopJumpTp()
+        end
+        refreshInfo()
+    end
+})
+
+Tab:Slider({
+    Title = "瞬移距离(身前)",
+    Step = 0.1,
+    Value = { Min = 0, Max = 10, Default = 3 },
+    Callback = function(val)
+        jumpTpDist = val
+        refreshInfo()
+    end
+})
+
+Tab:Slider({
+    Title = "瞬移冷却(秒)",
+    Step = 0.01,
+    Value = { Min = 0.01, Max = 2, Default = 0.2 },
+    Callback = function(val)
+        jumpTpCooldown = val
+        refreshInfo()
+    end
+})
+
+Tab:Button({
+    Title = "跳人瞬移次数归零",
+    Callback = function()
+        jumpTpCount = 0
+        jumpTpLastHitting = "无"
+        refreshInfo()
+    end
+})
+
+Tab:Toggle({
+    Title = "自动朝向攻击",
+    Type = "Checkbox",
+    Default = false,
+    Callback = function(state)
+        if state then
+            startAttack()
+        else
+            stopAttack()
+        end
+    end
+})
+
+Tab:Button({
+    Title = "立即连发一轮",
+    Callback = function()
+        fireBurst()
+        updateStats()
+    end
+})
+
+Tab:Slider({
+    Title = "朝向/攻击范围",
+    Step = 1,
+    Value = { Min = 2, Max = 200, Default = 20 },
+    Callback = function(val) scanRange = val end
+})
+
+Tab:Slider({
+    Title = "单发间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0, Max = 0.5, Default = 0.01 },
+    Callback = function(val) shotInterval = val end
+})
+
+Tab:Slider({
+    Title = "每轮间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0.01, Max = 1, Default = 0.05 },
+    Callback = function(val) roundDelay = val end
+})
+
+local InfoTab = Window:Tab({ Title = "攻击信息", Icon = "info", Locked = false })
+
+InfoTab:Paragraph({
+    Title = "只读展示攻击参数与当前设置，不能修改",
+    Image = "info",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+infoLabel = InfoTab:Paragraph({
+    Title = buildInfoText(),
+    Image = "list",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+InfoTab:Button({
+    Title = "刷新显示",
+    Callback = function()
+        refreshInfo()
+    end
+})
+
+InfoTab:Button({
+    Title = "输出到控制台",
+    Callback = function()
+        print(buildInfoText())
+    end
+})
+
+task.spawn(function()
+    while true do
+        refreshInfo()
+        task.wait(0.5)
+    end
+end)
+
+local RollTab = Window:Tab({ Title = "自动抽", Icon = "dices", Locked = false })
+
+RollTab:Paragraph({
+    Title = "循环调用 RollAttack，可先探测服务端冷却",
+    Image = "dices",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+RollTab:Toggle({
+    Title = "自动抽",
+    Type = "Checkbox",
+    Default = false,
+    Callback = function(state)
+        if state then
+            startRoll()
+        else
+            stopRoll()
+        end
+    end
+})
+
+RollTab:Button({
+    Title = "抽一次",
+    Callback = function()
+        rollOnce()
+    end
+})
+
+RollTab:Button({
+    Title = "探测冷却(2秒)",
+    Callback = function()
+        probeRoll(2)
+    end
+})
+
+RollTab:Button({
+    Title = "查看次数",
+    Callback = function()
+        WindUI:Notify({
+            Title = "抽取统计",
+            Content = string.format("调用 %d 次，成功 %d 次", rollCount, rollSuccess),
+            Duration = 2
+        })
+    end
+})
+
+RollTab:Slider({
+    Title = "抽取间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0.01, Max = 5, Default = 0.05 },
+    Callback = function(val) rollDelay = val end
+})
+
+RollTab:Slider({
+    Title = "并发线程数",
+    Step = 1,
+    Value = { Min = 1, Max = 8, Default = 1 },
+    Callback = function(val) rollWorkers = val end
+})
+
+local EmoteTab = Window:Tab({ Title = "表情动画", Icon = "smile", Locked = false })
+
+EmoteTab:Paragraph({
+    Title = "调用 Remotes.PlayEmote 播放表情，可作为攻击时的动画取消",
+    Image = "smile",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+EmoteTab:Dropdown({
+    Title = "选择表情",
+    Values = { "Bored", "Freestyle", "PetalDance" },
+    Value = "Bored",
+    Callback = function(option)
+        emoteName = option
+    end
+})
+
+EmoteTab:Button({
+    Title = "播放一次",
+    Callback = function()
+        playEmote(emoteName)
+    end
+})
+
+EmoteTab:Toggle({
+    Title = "循环播放表情",
+    Type = "Checkbox",
+    Default = false,
+    Callback = function(state)
+        if state then
+            startEmotes()
+        else
+            stopEmotes()
+        end
+    end
+})
+
+EmoteTab:Button({
+    Title = "停止全部动画",
+    Callback = function()
+        stopEmotes()
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
+                track:Stop(0)
+            end
+        end
+    end
+})
+
+EmoteTab:Button({
+    Title = "查看播放次数",
+    Callback = function()
+        WindUI:Notify({ Title = "表情统计", Content = string.format("累计播放 %d 次", emoteCount), Duration = 2 })
+    end
+})
+
+EmoteTab:Toggle({
+    Title = "表情取消动画",
+    Type = "Checkbox",
+    Default = false,
+    Callback = function(state)
+        emoteCancel = state
+    end
+})
+
+EmoteTab:Slider({
+    Title = "循环间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0.01, Max = 3, Default = 0.5 },
+    Callback = function(val) emoteDelay = val end
+})
