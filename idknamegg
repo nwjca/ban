@@ -1,0 +1,46 @@
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+
+WindUI.TransparencyValue = 0.2
+WindUI:SetTheme("Dark")
+
+local Window = WindUI:CreateWindow({
+    Title = "idknamegg",
+    Icon = "palette",
+    Author = "上面大名称下面",
+    Folder = "文件夹路径",
+    Size = UDim2.fromOffset(700, 500),
+    Theme = "Dark",
+    SideBarWidth = 220,
+    ScrollBarEnabled = true
+})
+
+local Tab = Window:Tab({
+    Title = "注入",
+    Icon = "download",
+    Locked = false
+})
+
+local BASE = "https://raw.githubusercontent.com/nwjca/ban/refs/heads/main/"
+
+local function loadRemote(name, path, desc)
+    Tab:Button({
+        Title = name,
+        Desc = desc,
+        Icon = "zap",
+        Callback = function()
+            local ok, err = pcall(function()
+                loadstring(game:HttpGet(BASE .. path))()
+            end)
+            if ok then
+                WindUI:Notify({ Title = name, Content = "脚本已加载", Duration = 2 })
+            else
+                WindUI:Notify({ Title = name .. " 失败", Content = tostring(err), Duration = 3 })
+            end
+        end
+    })
+end
+
+loadRemote("jjs", "jjs")
+loadRemote("僵尸生存", "%E5%83%B5%E5%B0%B8%E7%94%9F%E5%AD%98", "服务器没搞完")
+loadRemote("89", "89")
+loadRemote("随机抽奖", "%E9%9A%8F%E6%9C%BA%E6%8A%BD%E5%A5%96")
