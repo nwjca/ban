@@ -1,0 +1,976 @@
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+
+WindUI.TransparencyValue = 0.2
+WindUI:SetTheme("Dark")
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local Workspace = workspace
+
+local Window = WindUI:CreateWindow({
+    Title = "idknamegg",
+    Icon = "zap",
+    Author = "Demo",
+    Folder = "idknamegg",
+    Size = UDim2.fromOffset(620, 560),
+    Theme = "Dark",
+    SideBarWidth = 200,
+    ScrollBarEnabled = true
+})
+
+local Tab = Window:Tab({ Title = "黑闪", Icon = "bolt", Locked = false })
+
+local DivergentFistEvent
+local ok, res = pcall(function()
+    return ReplicatedStorage.Knit.Knit.Services.DivergentFistService.RE.Activated
+end)
+DivergentFistEvent = ok and res or nil
+
+local TeleportReportEvent
+do
+    local ok2, res2 = pcall(function()
+        return ReplicatedStorage.Knit.Knit.Services.AntiCheatService.RE.Teleport
+    end)
+    TeleportReportEvent = ok2 and res2 or nil
+end
+
+local TodoActiveEvent
+local TodoRightEvent
+do
+    local ok3, res3 = pcall(function()
+        return ReplicatedStorage.Knit.Knit.Services.TodoService.RE.Activated
+    end)
+    TodoActiveEvent = ok3 and res3 or nil
+    local ok4, res4 = pcall(function()
+        return ReplicatedStorage.Knit.Knit.Services.TodoService.RE.RightActivated
+    end)
+    TodoRightEvent = ok4 and res4 or nil
+end
+
+local autoLookAt = true
+local scanRange = 10
+local teleportDist = 4.3
+local cycleDelay = 0.25
+local secondDelay = 0.38
+local targetMode = "仅NPC"
+local LOCK_VALID_TIME = 0.2
+
+local enabled = false
+local teleportThread = nil
+local skillThread = nil
+local savedWalkSpeed = nil
+local toggleBtn = nil
+local hotkeyGui = nil
+local cachedMoveSet = nil
+local lastLockTime = 0
+
+local hotkeyFixed = false
+local HOTKEY_DEFAULT_POS = UDim2.new(0, 16, 0.65, 0)
+
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+local function isValidTarget(model)
+    if not model then return false end
+    if model == LocalPlayer.Character then return false end
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+
+    local isPlayer = Players:GetPlayerFromCharacter(model) ~= nil
+    if isPlayer then
+        return targetMode == "仅玩家" or targetMode == "NPC和玩家"
+    else
+        return targetMode == "仅NPC" or targetMode == "NPC和玩家"
+    end
+end
+
+local function getNearestTarget(root, range)
+    local nearest, minDist = nil, range
+    local parts = Workspace:GetPartBoundsInRadius(root.Position, range)
+    for _, part in ipairs(parts) do
+        local model = part:FindFirstAncestorOfClass("Model")
+        if model and isValidTarget(model) then
+            local targetRoot = model:FindFirstChild("HumanoidRootPart")
+            if targetRoot then
+                local dist = (root.Position - targetRoot.Position).Magnitude
+                if dist < minDist then
+                    minDist = dist
+                    nearest = targetRoot
+                end
+            end
+        end
+    end
+    return nearest
+end
+
+local function snapToTarget()
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+
+    local target = getNearestTarget(root, scanRange)
+    if not target then return false end
+
+    root.CFrame = target.CFrame * CFrame.new(0, 0, teleportDist)
+
+    if autoLookAt then
+        root.CFrame = CFrame.new(root.Position, Vector3.new(target.Position.X, root.Position.Y, target.Position.Z))
+    end
+
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+    return true
+end
+
+local function isLocked()
+    return (os.clock() - lastLockTime) <= LOCK_VALID_TIME
+end
+
+local function waitForLock()
+    while enabled do
+        if isLocked() then return true end
+        if snapToTarget() then
+            lastLockTime = os.clock()
+            return true
+        end
+        task.wait(0.05)
+    end
+    return false
+end
+
+local function fireSkill()
+    local char = LocalPlayer.Character
+    if not char or not DivergentFistEvent then return false end
+    if not cachedMoveSet or cachedMoveSet.Parent ~= char.Moveset then
+        cachedMoveSet = char:FindFirstChild("Moveset") and char.Moveset:FindFirstChild("Divergent Fist")
+    end
+    if not cachedMoveSet then return false end
+    DivergentFistEvent:FireServer(cachedMoveSet, nil)
+    return true
+end
+
+local function updateBtnVisual()
+    if not toggleBtn then return end
+    if enabled then
+        toggleBtn.BackgroundColor3 = Color3.fromRGB(0, 110, 60)
+        toggleBtn.Text = "ON"
+    else
+        toggleBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+        toggleBtn.Text = "OFF"
+    end
+end
+
+local function stopAll()
+    enabled = false
+    if teleportThread then
+        task.cancel(teleportThread)
+        teleportThread = nil
+    end
+    if skillThread then
+        task.cancel(skillThread)
+        skillThread = nil
+    end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum and savedWalkSpeed then
+        hum.WalkSpeed = savedWalkSpeed
+        savedWalkSpeed = nil
+    end
+    cachedMoveSet = nil
+    lastLockTime = 0
+    updateBtnVisual()
+end
+
+local function startAll()
+    if not DivergentFistEvent then
+        WindUI:Notify({Title = "错误", Content = "未找到黑闪远程事件", Icon = "x", Duration = 2})
+        return false
+    end
+    stopAll()
+    enabled = true
+
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        savedWalkSpeed = hum.WalkSpeed
+        hum.WalkSpeed = 0
+    end
+
+    teleportThread = task.spawn(function()
+        while enabled do
+            if snapToTarget() then
+                lastLockTime = os.clock()
+            end
+            RunService.RenderStepped:Wait()
+        end
+        teleportThread = nil
+    end)
+
+    skillThread = task.spawn(function()
+        while enabled do
+            if not waitForLock() then break end
+            fireSkill()
+
+            task.wait(secondDelay)
+            if not enabled then break end
+
+            if not waitForLock() then break end
+            fireSkill()
+
+            task.wait(cycleDelay)
+        end
+        skillThread = nil
+    end)
+
+    updateBtnVisual()
+    return true
+end
+
+local function toggle()
+    if enabled then
+        stopAll()
+        WindUI:Notify({Title = "已关闭", Content = "循环已停止", Icon = "x", Duration = 1.5})
+    else
+        if startAll() then
+            WindUI:Notify({Title = "已开启", Content = "持续瞬移 + 黑闪", Icon = "check", Duration = 1.5})
+        end
+    end
+end
+
+local function createHotkey()
+    if not isMobile or hotkeyGui then return end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "IdknameggHotkey"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 999
+    gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    hotkeyGui = gui
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.fromOffset(52, 52)
+    btn.Position = HOTKEY_DEFAULT_POS
+    btn.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    btn.BackgroundTransparency = 0.25
+    btn.Text = "OFF"
+    btn.TextColor3 = Color3.fromRGB(220, 220, 220)
+    btn.TextSize = 13
+    btn.Font = Enum.Font.GothamBold
+    btn.AutoButtonColor = false
+    btn.Parent = gui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(1, 0)
+    corner.Parent = btn
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Thickness = 1.5
+    stroke.Color = Color3.fromRGB(0, 150, 255)
+    stroke.Parent = btn
+
+    toggleBtn = btn
+    updateBtnVisual()
+
+    local dragging, dragStart, startPos, moved = false, nil, nil, false
+
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            moved = false
+            dragStart = input.Position
+            startPos = btn.Position
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if not dragging or hotkeyFixed then return end
+        if input.UserInputType ~= Enum.UserInputType.Touch
+            and input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+        local delta = input.Position - dragStart
+        if math.abs(delta.X) > 6 or math.abs(delta.Y) > 6 then moved = true end
+        btn.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.Touch
+            and input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+        if not dragging then return end
+        dragging = false
+        if not moved then toggle() end
+    end)
+end
+
+local function setHotkeyVisible(state)
+    if not isMobile then return end
+    if state then
+        createHotkey()
+        if hotkeyGui then hotkeyGui.Enabled = true end
+    elseif hotkeyGui then
+        hotkeyGui.Enabled = false
+    end
+end
+
+local function setHotkeyFixed(state)
+    hotkeyFixed = state
+    if not toggleBtn then return end
+    local stroke = toggleBtn:FindFirstChildOfClass("UIStroke")
+    if stroke then
+        if state then
+            stroke.Color = Color3.fromRGB(255, 180, 0)
+            stroke.Thickness = 2
+        else
+            stroke.Color = Color3.fromRGB(0, 150, 255)
+            stroke.Thickness = 1.5
+        end
+    end
+end
+
+local function resetHotkeyPosition()
+    if not toggleBtn then return end
+    toggleBtn.Position = HOTKEY_DEFAULT_POS
+end
+
+setHotkeyVisible(true)
+setHotkeyFixed(true)
+
+Tab:Paragraph({
+    Title = "开启后每帧锁定目标身后，锁定成功才连发黑闪",
+    Image = "zap",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+Tab:Dropdown({
+    Title = "目标类型",
+    Values = { "仅NPC", "仅玩家", "NPC和玩家" },
+    Value = "仅NPC",
+    Callback = function(option)
+        targetMode = option
+        WindUI:Notify({ Title = "目标类型", Content = "已切换为: " .. option, Duration = 1.5 })
+    end
+})
+
+Tab:Toggle({
+    Title = "循环瞬移黑闪",
+    Type = "Checkbox",
+    Default = false,
+    Callback = function(state)
+        if state and not enabled then toggle()
+        elseif (not state) and enabled then toggle() end
+    end
+})
+
+Tab:Toggle({
+    Title = "显示手机快捷键",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        setHotkeyVisible(state)
+    end
+})
+
+Tab:Toggle({
+    Title = "固定快捷键位置",
+    Desc = "开启后快捷键按钮不可拖动，位置锁死在当前处",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        setHotkeyFixed(state)
+        WindUI:Notify({
+            Title = "快捷键",
+            Content = state and "已固定位置(不可拖动)" or "已解锁(可拖动)",
+            Duration = 1.5
+        })
+    end
+})
+
+Tab:Button({
+    Title = "快捷键位置复位",
+    Callback = function()
+        resetHotkeyPosition()
+    end
+})
+
+Tab:Toggle({
+    Title = "瞬移后朝向目标",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        autoLookAt = state
+    end
+})
+
+Tab:Slider({
+    Title = "扫描距离",
+    Step = 0.5,
+    Value = { Min = 2, Max = 30, Default = 10 },
+    Callback = function(val) scanRange = val end
+})
+
+Tab:Slider({
+    Title = "身后距离",
+    Step = 0.1,
+    Value = { Min = 1, Max = 8, Default = 4.3 },
+    Callback = function(val) teleportDist = val end
+})
+
+Tab:Slider({
+    Title = "两次释放间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0.05, Max = 1, Default = 0.38 },
+    Callback = function(val) secondDelay = val end
+})
+
+Tab:Slider({
+    Title = "循环间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0.05, Max = 3, Default = 0.25 },
+    Callback = function(val) cycleDelay = val end
+})
+
+local FaceTab = Window:Tab({ Title = "朝向", Icon = "compass", Locked = false })
+
+local autoFaceEnabled = false
+local heartbeatConnection = nil
+
+local function findClosestPlayer()
+    local closestDistance = math.huge
+    local closestPlayer = nil
+    local character = LocalPlayer.Character
+    if not (character and character:FindFirstChild("HumanoidRootPart")) then
+        return nil
+    end
+    local hrp = character.HumanoidRootPart
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local targetChar = player.Character
+            if targetChar then
+                local targetHRP = targetChar:FindFirstChild("HumanoidRootPart")
+                local humanoid = targetChar:FindFirstChildOfClass("Humanoid")
+                if targetHRP and humanoid and humanoid.Health > 0 then
+                    local distance = (hrp.Position - targetHRP.Position).Magnitude
+                    if distance < closestDistance then
+                        closestDistance = distance
+                        closestPlayer = player
+                    end
+                end
+            end
+        end
+    end
+    return closestPlayer
+end
+
+local function facePlayer(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then
+        return false
+    end
+    local targetHRP = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local localHRP = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if targetHRP and localHRP then
+        local lookAt = (targetHRP.Position - localHRP.Position)
+        lookAt = Vector3.new(lookAt.X, 0, lookAt.Z)
+        if lookAt.Magnitude > 0.1 then
+            localHRP.CFrame = CFrame.lookAt(localHRP.Position, localHRP.Position + lookAt)
+            return true
+        end
+    end
+    return false
+end
+
+local function stopAutoFace()
+    if heartbeatConnection then
+        heartbeatConnection:Disconnect()
+        heartbeatConnection = nil
+    end
+end
+
+local function startAutoFace()
+    stopAutoFace()
+    heartbeatConnection = RunService.Heartbeat:Connect(function()
+        if not autoFaceEnabled then
+            stopAutoFace()
+            return
+        end
+        local target = findClosestPlayer()
+        if target then
+            facePlayer(target)
+        end
+    end)
+end
+
+FaceTab:Toggle({
+    Title = "自动朝向最近玩家",
+    Desc = "持续转向最近的存活玩家",
+    Type = "Checkbox",
+    Default = false,
+    Callback = function(state)
+        autoFaceEnabled = state
+        if state then
+            startAutoFace()
+            WindUI:Notify({ Title = "朝向", Content = "自动朝向已启用", Icon = "check", Duration = 2 })
+        else
+            stopAutoFace()
+            WindUI:Notify({ Title = "朝向", Content = "自动朝向已禁用", Icon = "x", Duration = 2 })
+        end
+    end
+})
+
+LocalPlayer.CharacterAdded:Connect(function()
+    if autoFaceEnabled then
+        startAutoFace()
+    end
+end)
+
+local ComboTab = Window:Tab({ Title = "自动连招", Icon = "swords", Locked = false })
+
+local comboEnabled = false
+local comboThread = nil
+local comboMode = "左键+右键"
+local comboRange = 18
+local comboCallDelay = 0.35
+local comboLoopDelay = 0.3
+local comboCount = 0
+local comboRightCount = 0
+local comboLastTarget = "无"
+local comboLabel
+
+local comboHotkeyGui = nil
+local comboHotkeyBtn = nil
+local comboHotkeyFixed = true
+local comboHotkeyVisible = true
+local COMBO_HOTKEY_DEFAULT_POS = UDim2.new(0, 16, 0.78, 0)
+
+local function getCharactersFolder()
+    return Workspace:FindFirstChild("Characters")
+end
+
+local function getNearestCharacter()
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return nil end
+
+    local folder = getCharactersFolder()
+    if not folder then return nil end
+
+    local best, minDist = nil, comboRange
+    for _, model in ipairs(folder:GetChildren()) do
+        if model:IsA("Model") and model ~= char then
+            local hum = model:FindFirstChildOfClass("Humanoid")
+            local tr = model:FindFirstChild("HumanoidRootPart")
+            if hum and hum.Health > 0 and tr then
+                local d = (root.Position - tr.Position).Magnitude
+                if d < minDist then
+                    minDist = d
+                    best = model
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function fireActive(target)
+    if not TodoActiveEvent or not target then return false end
+    local ok5 = pcall(function()
+        TodoActiveEvent:FireServer(false, target)
+    end)
+    if ok5 then
+        comboCount = comboCount + 1
+    end
+    return ok5
+end
+
+local function fireRight(target)
+    if not TodoRightEvent or not target then return false end
+    local ok6 = pcall(function()
+        TodoRightEvent:FireServer(target)
+    end)
+    if ok6 then
+        comboRightCount = comboRightCount + 1
+    end
+    return ok6
+end
+
+local function attackOnce()
+    local target = getNearestCharacter()
+    if not target then return false end
+
+    comboLastTarget = target.Name
+
+    if comboMode == "仅左键" then
+        fireActive(target)
+    elseif comboMode == "仅右键" then
+        fireRight(target)
+    else
+        fireActive(target)
+        if comboCallDelay > 0 then
+            task.wait(comboCallDelay)
+        end
+        fireRight(target)
+    end
+
+    return true
+end
+
+local function updateComboBtnVisual()
+    if not comboHotkeyBtn then return end
+    if comboEnabled then
+        comboHotkeyBtn.BackgroundColor3 = Color3.fromRGB(0, 110, 60)
+        comboHotkeyBtn.Text = "ON"
+        comboHotkeyBtn.TextColor3 = Color3.fromRGB(235, 255, 240)
+    else
+        comboHotkeyBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+        comboHotkeyBtn.Text = "OFF"
+        comboHotkeyBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+    end
+end
+
+local function refreshComboLabel()
+    if not comboLabel then return end
+    local lines = {}
+    table.insert(lines, "运行状态: " .. (comboEnabled and "开启" or "关闭"))
+    table.insert(lines, "连招模式: " .. comboMode)
+    table.insert(lines, string.format("攻击范围: %.1f", comboRange))
+    table.insert(lines, string.format("左键/右键间隔: %.3f 秒", comboCallDelay))
+    table.insert(lines, string.format("循环间隔: %.3f 秒", comboLoopDelay))
+    table.insert(lines, "最近目标: " .. comboLastTarget)
+    table.insert(lines, "左键发送: " .. tostring(comboCount) .. " 次")
+    table.insert(lines, "右键发送: " .. tostring(comboRightCount) .. " 次")
+    pcall(function()
+        comboLabel:SetTitle(table.concat(lines, "\n"))
+    end)
+end
+
+local function stopCombo()
+    comboEnabled = false
+    if comboThread then
+        task.cancel(comboThread)
+        comboThread = nil
+    end
+    updateComboBtnVisual()
+    refreshComboLabel()
+end
+
+local function startCombo()
+    if not TodoActiveEvent and not TodoRightEvent then
+        WindUI:Notify({ Title = "错误", Content = "未找到 TodoService 远程事件", Icon = "x", Duration = 2 })
+        return false
+    end
+    stopCombo()
+    comboEnabled = true
+    comboCount = 0
+    comboRightCount = 0
+    comboLastTarget = "无"
+
+    comboThread = task.spawn(function()
+        while comboEnabled do
+            if not attackOnce() then
+                task.wait(0.1)
+            end
+            task.wait(comboLoopDelay)
+        end
+        comboThread = nil
+    end)
+
+    updateComboBtnVisual()
+    refreshComboLabel()
+    return true
+end
+
+local function createComboHotkey()
+    if not isMobile or comboHotkeyGui then return end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "IdknameggComboHotkey"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 999
+    gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    comboHotkeyGui = gui
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.fromOffset(52, 52)
+    btn.Position = COMBO_HOTKEY_DEFAULT_POS
+    btn.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    btn.BackgroundTransparency = 0.25
+    btn.Text = "OFF"
+    btn.TextColor3 = Color3.fromRGB(220, 220, 220)
+    btn.TextSize = 13
+    btn.Font = Enum.Font.GothamBold
+    btn.AutoButtonColor = false
+    btn.Parent = gui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(1, 0)
+    corner.Parent = btn
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Thickness = 2
+    stroke.Color = Color3.fromRGB(255, 180, 0)
+    stroke.Parent = btn
+
+    comboHotkeyBtn = btn
+    updateComboBtnVisual()
+
+    local dragging, dragStart, startPos, moved = false, nil, nil, false
+
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            moved = false
+            dragStart = input.Position
+            startPos = btn.Position
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if not dragging or comboHotkeyFixed then return end
+        if input.UserInputType ~= Enum.UserInputType.Touch
+            and input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+        local delta = input.Position - dragStart
+        if math.abs(delta.X) > 6 or math.abs(delta.Y) > 6 then moved = true end
+        btn.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.Touch
+            and input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+        if not dragging then return end
+        dragging = false
+        if not moved then
+            if comboEnabled then
+                stopCombo()
+            else
+                startCombo()
+            end
+            updateComboBtnVisual()
+        end
+    end)
+end
+
+local function setComboHotkeyVisible(state)
+    if not isMobile then return end
+    comboHotkeyVisible = state
+    if state then
+        createComboHotkey()
+        if comboHotkeyGui then comboHotkeyGui.Enabled = true end
+    elseif comboHotkeyGui then
+        comboHotkeyGui.Enabled = false
+    end
+    refreshComboLabel()
+end
+
+local function setComboHotkeyFixed(state)
+    comboHotkeyFixed = state
+    if not comboHotkeyBtn then return end
+    local stroke = comboHotkeyBtn:FindFirstChildOfClass("UIStroke")
+    if stroke then
+        if state then
+            stroke.Color = Color3.fromRGB(255, 180, 0)
+            stroke.Thickness = 2
+        else
+            stroke.Color = Color3.fromRGB(0, 150, 255)
+            stroke.Thickness = 1.5
+        end
+    end
+end
+
+local function resetComboHotkeyPosition()
+    if not comboHotkeyBtn then return end
+    comboHotkeyBtn.Position = COMBO_HOTKEY_DEFAULT_POS
+end
+
+createComboHotkey()
+setComboHotkeyFixed(comboHotkeyFixed)
+
+ComboTab:Paragraph({
+    Title = "按目标模型直接触发 TodoService 连招，自动锁定范围内最近角色",
+    Image = "swords",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+comboLabel = ComboTab:Paragraph({
+    Title = "开启后显示实时统计",
+    Image = "activity",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+ComboTab:Toggle({
+    Title = "自动连招",
+    Type = "Checkbox",
+    Default = false,
+    Callback = function(state)
+        if state then
+            if startCombo() then
+                WindUI:Notify({ Title = "自动连招", Content = "已开启", Icon = "check", Duration = 1.5 })
+            end
+        else
+            stopCombo()
+            WindUI:Notify({ Title = "自动连招", Content = "已关闭", Icon = "x", Duration = 1.5 })
+        end
+    end
+})
+
+ComboTab:Dropdown({
+    Title = "连招模式",
+    Values = { "左键+右键", "仅左键", "仅右键" },
+    Value = "左键+右键",
+    Callback = function(option)
+        comboMode = option
+        refreshComboLabel()
+    end
+})
+
+ComboTab:Button({
+    Title = "打一次",
+    Callback = function()
+        attackOnce()
+        refreshComboLabel()
+    end
+})
+
+ComboTab:Slider({
+    Title = "攻击范围",
+    Step = 0.5,
+    Value = { Min = 2, Max = 60, Default = 18 },
+    Callback = function(val)
+        comboRange = val
+        refreshComboLabel()
+    end
+})
+
+ComboTab:Slider({
+    Title = "左键/右键间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0, Max = 1, Default = 0.35 },
+    Callback = function(val)
+        comboCallDelay = val
+        refreshComboLabel()
+    end
+})
+
+ComboTab:Slider({
+    Title = "循环间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0.01, Max = 3, Default = 0.3 },
+    Callback = function(val)
+        comboLoopDelay = val
+        refreshComboLabel()
+    end
+})
+
+ComboTab:Paragraph({
+    Title = "推荐配置：左键/右键间隔 0.35 秒 + 循环间隔 0.3 秒，左键打上去、右键接续，节奏最顺也不容易被服务端判频率异常",
+    Image = "info",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+ComboTab:Button({
+    Title = "套用推荐值(0.35 / 0.3)",
+    Callback = function()
+        comboCallDelay = 0.35
+        comboLoopDelay = 0.3
+        refreshComboLabel()
+        WindUI:Notify({
+            Title = "已套用推荐值",
+            Content = "左键/右键 0.35 秒，循环 0.3 秒",
+            Icon = "check",
+            Duration = 2
+        })
+    end
+})
+
+ComboTab:Toggle({
+    Title = "显示连招快捷键",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        setComboHotkeyVisible(state)
+    end
+})
+
+ComboTab:Toggle({
+    Title = "固定连招快捷键位置",
+    Desc = "开启后连招快捷键不可拖动，位置锁死在当前处",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        setComboHotkeyFixed(state)
+        WindUI:Notify({
+            Title = "连招快捷键",
+            Content = state and "已固定位置(不可拖动)" or "已解锁(可拖动)",
+            Duration = 1.5
+        })
+    end
+})
+
+ComboTab:Button({
+    Title = "连招快捷键位置复位",
+    Callback = function()
+        resetComboHotkeyPosition()
+    end
+})
+
+ComboTab:Button({
+    Title = "刷新统计",
+    Callback = function()
+        refreshComboLabel()
+    end
+})
+
+ComboTab:Button({
+    Title = "列出范围内角色",
+    Callback = function()
+        local folder = getCharactersFolder()
+        if not folder then
+            WindUI:Notify({ Title = "提示", Content = "未找到 workspace.Characters", Icon = "x", Duration = 2 })
+            return
+        end
+
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local list = {}
+
+        for _, model in ipairs(folder:GetChildren()) do
+            if model:IsA("Model") and model ~= char then
+                local hum = model:FindFirstChildOfClass("Humanoid")
+                local tr = model:FindFirstChild("HumanoidRootPart")
+                if hum and tr and hum.Health > 0 then
+                    local d = root and (root.Position - tr.Position).Magnitude or 0
+                    if d <= comboRange then
+                        table.insert(list, string.format("%s  血量=%d  距离=%.1f", model.Name, math.floor(hum.Health), d))
+                    end
+                end
+            end
+        end
+
+        if #list == 0 then
+            WindUI:Notify({ Title = "范围内角色", Content = "没有符合条件的角色", Duration = 3 })
+        else
+            print(table.concat(list, "\n"))
+            WindUI:Notify({ Title = "范围内角色", Content = string.format("共 %d 个，已输出控制台", #list), Duration = 3 })
+        end
+    end
+})
+
+task.spawn(function()
+    while true do
+        refreshComboLabel()
+        task.wait(0.5)
+    end
+end)
