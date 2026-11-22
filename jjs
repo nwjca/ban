@@ -1,0 +1,2189 @@
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+
+WindUI.TransparencyValue = 0.2
+WindUI:SetTheme("Dark")
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Stats = game:GetService("Stats")
+local LocalPlayer = Players.LocalPlayer
+local Workspace = workspace
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+local useCache = true
+local RemoteCache = {}
+local MoveSetCache = { char = nil, moves = {} }
+local SendThrottle = {}
+
+local function getRemote(serviceName, eventName)
+    local key = serviceName .. "." .. eventName
+    if useCache and RemoteCache[key] then
+        return RemoteCache[key]
+    end
+    local ok, res = pcall(function()
+        return ReplicatedStorage.Knit.Knit.Services[serviceName].RE[eventName]
+    end)
+    local remote = ok and res or nil
+    if useCache and remote then
+        RemoteCache[key] = remote
+    end
+    return remote
+end
+
+local function clearCaches()
+    RemoteCache = {}
+    MoveSetCache = { char = nil, moves = {} }
+    SendThrottle = {}
+end
+
+local function getMovesetChild(name)
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local folder = char:FindFirstChild("Moveset")
+    if not folder then return nil end
+
+    if not useCache then
+        return folder:FindFirstChild(name)
+    end
+
+    if MoveSetCache.char ~= char then
+        MoveSetCache = { char = char, moves = {} }
+    end
+
+    local cached = MoveSetCache.moves[name]
+    if cached and cached.Parent == folder then
+        return cached
+    end
+    local child = folder:FindFirstChild(name)
+    MoveSetCache.moves[name] = child
+    return child
+end
+
+local function canSend(key, minInterval)
+    local now = os.clock()
+    local last = SendThrottle[key]
+    if last and (now - last) < minInterval then
+        return false
+    end
+    SendThrottle[key] = now
+    return true
+end
+
+local function createFloatingHotkey(opts)
+    if not isMobile then return nil end
+
+    local old = PlayerGui:FindFirstChild(opts.guiName)
+    if old then old:Destroy() end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = opts.guiName
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 999
+    gui.Parent = PlayerGui
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.fromOffset(52, 52)
+    btn.Position = opts.defaultPos
+    btn.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    btn.BackgroundTransparency = 0.25
+    btn.Text = "OFF"
+    btn.TextColor3 = Color3.fromRGB(220, 220, 220)
+    btn.TextSize = 13
+    btn.Font = Enum.Font.GothamBold
+    btn.AutoButtonColor = false
+    btn.Parent = gui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(1, 0)
+    corner.Parent = btn
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Thickness = 1.5
+    stroke.Color = Color3.fromRGB(0, 150, 255)
+    stroke.Parent = btn
+
+    local api = { gui = gui, btn = btn, fixed = true, visible = true, defaultPos = opts.defaultPos }
+
+    api.refresh = function()
+        local on = false
+        pcall(function() on = opts.getState() end)
+        if on then
+            btn.Text = "ON"
+            btn.BackgroundColor3 = Color3.fromRGB(0, 110, 60)
+            btn.TextColor3 = Color3.fromRGB(235, 255, 240)
+        else
+            btn.Text = "OFF"
+            btn.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+            btn.TextColor3 = Color3.fromRGB(220, 220, 220)
+        end
+        stroke.Color = api.fixed and Color3.fromRGB(255, 180, 0) or Color3.fromRGB(0, 150, 255)
+        stroke.Thickness = api.fixed and 2 or 1.5
+    end
+
+    api.setVisible = function(state)
+        api.visible = state
+        gui.Enabled = state
+    end
+
+    api.setFixed = function(state)
+        api.fixed = state
+        api.refresh()
+    end
+
+    api.reset = function()
+        btn.Position = api.defaultPos
+    end
+
+    local dragging, dragStart, startPos, moved = false, nil, nil, false
+
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            moved = false
+            dragStart = input.Position
+            startPos = btn.Position
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if not dragging or api.fixed then return end
+        if input.UserInputType ~= Enum.UserInputType.Touch
+            and input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+        local delta = input.Position - dragStart
+        if math.abs(delta.X) > 6 or math.abs(delta.Y) > 6 then moved = true end
+        btn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.Touch
+            and input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+        if not dragging then return end
+        dragging = false
+        if not moved then
+            pcall(function() opts.onToggle() end)
+            api.refresh()
+        end
+    end)
+
+    api.refresh()
+    return api
+end
+
+local Window = WindUI:CreateWindow({
+    Title = "idknamegg",
+    Icon = "zap",
+    Author = "Demo",
+    Folder = "idknamegg",
+    Size = UDim2.fromOffset(620, 560),
+    Theme = "Dark",
+    SideBarWidth = 200,
+    ScrollBarEnabled = true
+})
+
+local function parseNames(text)
+    local out = {}
+    if not text then return out end
+    for token in string.gmatch(text, "[^,，;；%s]+") do
+        out[#out + 1] = string.lower(token)
+    end
+    return out
+end
+
+local faceWhitelist = {}
+local faceBlacklist = {}
+
+local function matchAny(list, names)
+    for _, item in ipairs(list) do
+        for _, n in ipairs(names) do
+            if item == n then return true end
+        end
+    end
+    return false
+end
+
+local function nameAllowed(player, char)
+    local names = {
+        string.lower(player.Name or ""),
+        string.lower(player.DisplayName or "")
+    }
+    if char then
+        names[#names + 1] = string.lower(char.Name or "")
+    end
+    if #faceBlacklist > 0 and matchAny(faceBlacklist, names) then
+        return false
+    end
+    if #faceWhitelist > 0 then
+        return matchAny(faceWhitelist, names)
+    end
+    return true
+end
+
+local Tab = Window:Tab({ Title = "黑闪", Icon = "bolt", Locked = false })
+
+local autoLookAt = true
+local scanRange = 10
+local teleportDist = 5.2
+local cycleDelay = 0.27
+local secondDelay = 0.3
+local targetMode = "仅NPC"
+local LOCK_VALID_TIME = 0.2
+local TARGET_CACHE_TIME = 0.08
+local BLACK_MIN_INTERVAL = 0.03
+
+local enabled = false
+local teleportThread = nil
+local skillThread = nil
+local savedWalkSpeed = nil
+local lastLockTime = 0
+local cachedTargetRoot = nil
+local cachedTargetTime = 0
+local hotkeyBlack = nil
+
+local function isValidTarget(model)
+    if not model then return false end
+    if model == LocalPlayer.Character then return false end
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+    local isPlayer = Players:GetPlayerFromCharacter(model) ~= nil
+    if isPlayer then
+        return targetMode == "仅玩家" or targetMode == "NPC和玩家"
+    else
+        return targetMode == "仅NPC" or targetMode == "NPC和玩家"
+    end
+end
+
+local function scanNearestTarget(root, range)
+    local nearest, minDist = nil, range
+    local parts = Workspace:GetPartBoundsInRadius(root.Position, range)
+    for _, part in ipairs(parts) do
+        local model = part:FindFirstAncestorOfClass("Model")
+        if model and isValidTarget(model) then
+            local targetRoot = model:FindFirstChild("HumanoidRootPart")
+            if targetRoot then
+                local dist = (root.Position - targetRoot.Position).Magnitude
+                if dist < minDist then
+                    minDist = dist
+                    nearest = targetRoot
+                end
+            end
+        end
+    end
+    return nearest
+end
+
+local function getCachedTarget(root)
+    if not useCache then
+        return scanNearestTarget(root, scanRange)
+    end
+    local now = os.clock()
+    if cachedTargetRoot and cachedTargetRoot.Parent and (now - cachedTargetTime) < TARGET_CACHE_TIME then
+        local model = cachedTargetRoot.Parent
+        local hum = model and model:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health > 0 then
+            return cachedTargetRoot
+        end
+    end
+    cachedTargetRoot = scanNearestTarget(root, scanRange)
+    cachedTargetTime = now
+    return cachedTargetRoot
+end
+
+local function snapToTarget()
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+
+    local target = getCachedTarget(root)
+    if not target then return false end
+
+    root.CFrame = target.CFrame * CFrame.new(0, 0, teleportDist)
+
+    if autoLookAt then
+        root.CFrame = CFrame.new(root.Position, Vector3.new(target.Position.X, root.Position.Y, target.Position.Z))
+    end
+
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+    return true
+end
+
+local function isLocked()
+    return (os.clock() - lastLockTime) <= LOCK_VALID_TIME
+end
+
+local function waitForLock()
+    while enabled do
+        if isLocked() then return true end
+        if snapToTarget() then
+            lastLockTime = os.clock()
+            return true
+        end
+        task.wait(0.05)
+    end
+    return false
+end
+
+local function fireSkill()
+    local remote = getRemote("DivergentFistService", "Activated")
+    if not remote then return false end
+    local moveset = getMovesetChild("Divergent Fist")
+    if not moveset then return false end
+    if not canSend("divergent", BLACK_MIN_INTERVAL) then return false end
+    local ok = pcall(function()
+        remote:FireServer(moveset, nil)
+    end)
+    return ok
+end
+
+local function refreshBlackHotkey()
+    if hotkeyBlack then hotkeyBlack.refresh() end
+end
+
+local function stopAll()
+    enabled = false
+    if teleportThread then
+        task.cancel(teleportThread)
+        teleportThread = nil
+    end
+    if skillThread then
+        task.cancel(skillThread)
+        skillThread = nil
+    end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum and savedWalkSpeed then
+        hum.WalkSpeed = savedWalkSpeed
+        savedWalkSpeed = nil
+    end
+    lastLockTime = 0
+    cachedTargetRoot = nil
+    refreshBlackHotkey()
+end
+
+local function startAll()
+    if not getRemote("DivergentFistService", "Activated") then
+        WindUI:Notify({Title = "错误", Content = "未找到黑闪远程事件", Icon = "x", Duration = 2})
+        return false
+    end
+    stopAll()
+    enabled = true
+
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        savedWalkSpeed = hum.WalkSpeed
+        hum.WalkSpeed = 0
+    end
+
+    teleportThread = task.spawn(function()
+        while enabled do
+            if snapToTarget() then
+                lastLockTime = os.clock()
+            end
+            RunService.RenderStepped:Wait()
+        end
+        teleportThread = nil
+    end)
+
+    skillThread = task.spawn(function()
+        while enabled do
+            if not waitForLock() then break end
+            fireSkill()
+
+            task.wait(secondDelay)
+            if not enabled then break end
+
+            if not waitForLock() then break end
+            fireSkill()
+
+            task.wait(cycleDelay)
+        end
+        skillThread = nil
+    end)
+
+    refreshBlackHotkey()
+    return true
+end
+
+local function toggle()
+    if enabled then
+        stopAll()
+        WindUI:Notify({Title = "已关闭", Content = "循环已停止", Icon = "x", Duration = 1.5})
+    else
+        if startAll() then
+            WindUI:Notify({Title = "已开启", Content = "持续瞬移 + 黑闪", Icon = "check", Duration = 1.5})
+        end
+    end
+    refreshBlackHotkey()
+end
+
+hotkeyBlack = createFloatingHotkey({
+    guiName = "IdknameggHotkey",
+    defaultPos = UDim2.new(0, 16, 0.65, 0),
+    getState = function() return enabled end,
+    onToggle = function() toggle() end
+})
+
+Tab:Paragraph({
+    Title = "开启后每帧锁定目标身后，锁定成功才连发黑闪；远程与招式已走缓存",
+    Image = "zap",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+Tab:Toggle({
+    Title = "启用缓存（远程/招式/目标）",
+    Desc = "关闭后每次出招都重新查找远程与招式，请求更重",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        useCache = state
+        clearCaches()
+        WindUI:Notify({Title = "缓存", Content = state and "已启用" or "已关闭", Duration = 1.5})
+    end
+})
+
+Tab:Button({
+    Title = "清空缓存并重新获取",
+    Callback = function()
+        clearCaches()
+        WindUI:Notify({Title = "缓存", Content = "已清空，下次使用会重新获取", Duration = 1.5})
+    end
+})
+
+Tab:Dropdown({
+    Title = "目标类型",
+    Values = { "仅NPC", "仅玩家", "NPC和玩家" },
+    Value = "仅NPC",
+    Callback = function(option)
+        targetMode = option
+        cachedTargetRoot = nil
+    end
+})
+
+Tab:Toggle({
+    Title = "循环瞬移黑闪",
+    Type = "Checkbox",
+    Default = false,
+    Callback = function(state)
+        if state and not enabled then toggle()
+        elseif (not state) and enabled then toggle() end
+    end
+})
+
+Tab:Toggle({
+    Title = "显示手机快捷键",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        if hotkeyBlack then hotkeyBlack.setVisible(state) end
+    end
+})
+
+Tab:Toggle({
+    Title = "固定快捷键位置",
+    Desc = "开启后快捷键按钮不可拖动，位置锁死在当前处",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        if hotkeyBlack then hotkeyBlack.setFixed(state) end
+    end
+})
+
+Tab:Button({
+    Title = "快捷键位置复位",
+    Callback = function()
+        if hotkeyBlack then hotkeyBlack.reset() end
+    end
+})
+
+Tab:Toggle({
+    Title = "瞬移后朝向目标",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        autoLookAt = state
+    end
+})
+
+Tab:Slider({
+    Title = "扫描距离",
+    Step = 0.5,
+    Value = { Min = 2, Max = 30, Default = 10 },
+    Callback = function(val) scanRange = val; cachedTargetRoot = nil end
+})
+
+Tab:Slider({
+    Title = "身后距离",
+    Step = 0.1,
+    Value = { Min = 1, Max = 10, Default = 5.2 },
+    Callback = function(val) teleportDist = val end
+})
+
+Tab:Slider({
+    Title = "两次释放间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0.05, Max = 1, Default = 0.3 },
+    Callback = function(val) secondDelay = val end
+})
+
+Tab:Slider({
+    Title = "循环间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0.05, Max = 3, Default = 0.27 },
+    Callback = function(val) cycleDelay = val end
+})
+
+Tab:Slider({
+    Title = "目标缓存刷新(秒)",
+    Step = 0.01,
+    Value = { Min = 0.02, Max = 0.5, Default = 0.08 },
+    Callback = function(val) TARGET_CACHE_TIME = val end
+})
+
+local FaceTab = Window:Tab({ Title = "朝向", Icon = "compass", Locked = false })
+
+local autoFaceEnabled = false
+local heartbeatConnection = nil
+local faceListLabel = nil
+
+local function findClosestPlayer()
+    local closestDistance = math.huge
+    local closestPlayer = nil
+    local character = LocalPlayer.Character
+    if not (character and character:FindFirstChild("HumanoidRootPart")) then
+        return nil
+    end
+    local hrp = character.HumanoidRootPart
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local targetChar = player.Character
+            if targetChar then
+                local targetHRP = targetChar:FindFirstChild("HumanoidRootPart")
+                local humanoid = targetChar:FindFirstChildOfClass("Humanoid")
+                if targetHRP and humanoid and humanoid.Health > 0 then
+                    if nameAllowed(player, targetChar) then
+                        local distance = (hrp.Position - targetHRP.Position).Magnitude
+                        if distance < closestDistance then
+                            closestDistance = distance
+                            closestPlayer = player
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return closestPlayer
+end
+
+local function facePlayer(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then return false end
+    local targetHRP = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local localHRP = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if targetHRP and localHRP then
+        local lookAt = (targetHRP.Position - localHRP.Position)
+        lookAt = Vector3.new(lookAt.X, 0, lookAt.Z)
+        if lookAt.Magnitude > 0.1 then
+            localHRP.CFrame = CFrame.lookAt(localHRP.Position, localHRP.Position + lookAt)
+            return true
+        end
+    end
+    return false
+end
+
+local function stopAutoFace()
+    if heartbeatConnection then
+        heartbeatConnection:Disconnect()
+        heartbeatConnection = nil
+    end
+end
+
+local function startAutoFace()
+    stopAutoFace()
+    heartbeatConnection = RunService.Heartbeat:Connect(function()
+        if not autoFaceEnabled then
+            stopAutoFace()
+            return
+        end
+        local target = findClosestPlayer()
+        if target then
+            facePlayer(target)
+        end
+    end)
+end
+
+local function refreshFaceList()
+    if not faceListLabel then return end
+    local w = (#faceWhitelist > 0) and table.concat(faceWhitelist, ", ") or "（空，全部玩家）"
+    local b = (#faceBlacklist > 0) and table.concat(faceBlacklist, ", ") or "（空）"
+    pcall(function()
+        faceListLabel:SetTitle("白名单: " .. w .. "\n黑名单: " .. b)
+    end)
+end
+
+FaceTab:Paragraph({
+    Title = "自动朝向最近存活玩家，可用白名单/黑名单精确指定朝向谁",
+    Image = "compass",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+FaceTab:Toggle({
+    Title = "自动朝向最近玩家",
+    Desc = "持续转向最近的存活玩家",
+    Type = "Checkbox",
+    Default = false,
+    Callback = function(state)
+        autoFaceEnabled = state
+        if state then
+            startAutoFace()
+            WindUI:Notify({ Title = "朝向", Content = "自动朝向已启用", Icon = "check", Duration = 2 })
+        else
+            stopAutoFace()
+            WindUI:Notify({ Title = "朝向", Content = "自动朝向已禁用", Icon = "x", Duration = 2 })
+        end
+    end
+})
+
+FaceTab:Input({
+    Title = "白名单(名字, 逗号分隔)",
+    Desc = "填了就只朝这些名字看，留空表示全部玩家",
+    Value = "",
+    Type = "Input",
+    Placeholder = "例如 cnm11451414524, Dummy",
+    Callback = function(text)
+        faceWhitelist = parseNames(text)
+        refreshFaceList()
+    end
+})
+
+FaceTab:Input({
+    Title = "黑名单(名字, 逗号分隔)",
+    Desc = "填了就不朝这些名字看",
+    Value = "",
+    Type = "Input",
+    Placeholder = "例如 Noob, Alt",
+    Callback = function(text)
+        faceBlacklist = parseNames(text)
+        refreshFaceList()
+    end
+})
+
+faceListLabel = FaceTab:Paragraph({
+    Title = "白名单: （空，全部玩家）\n黑名单: （空）",
+    Image = "list",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+FaceTab:Button({
+    Title = "清空白名单",
+    Callback = function()
+        faceWhitelist = {}
+        refreshFaceList()
+        WindUI:Notify({ Title = "白名单", Content = "已清空（朝向全部玩家）", Duration = 1.5 })
+    end
+})
+
+FaceTab:Button({
+    Title = "清空黑名单",
+    Callback = function()
+        faceBlacklist = {}
+        refreshFaceList()
+        WindUI:Notify({ Title = "黑名单", Content = "已清空", Duration = 1.5 })
+    end
+})
+
+FaceTab:Button({
+    Title = "列出当前在线玩家名",
+    Callback = function()
+        local list = {}
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then
+                list[#list + 1] = string.format("%s (显示名: %s)", plr.Name, plr.DisplayName)
+            end
+        end
+        if #list == 0 then
+            WindUI:Notify({ Title = "在线玩家", Content = "没有其他玩家", Duration = 2 })
+        else
+            print(table.concat(list, "\n"))
+            WindUI:Notify({ Title = "在线玩家", Content = string.format("共 %d 人，已输出控制台", #list), Duration = 2 })
+        end
+    end
+})
+
+FaceTab:Button({
+    Title = "测试当前朝向目标",
+    Callback = function()
+        local target = findClosestPlayer()
+        if target then
+            facePlayer(target)
+            WindUI:Notify({ Title = "朝向测试", Content = "已朝向: " .. target.Name, Duration = 2 })
+        else
+            WindUI:Notify({ Title = "朝向测试", Content = "当前名单下没有可用目标", Icon = "x", Duration = 2 })
+        end
+    end
+})
+
+LocalPlayer.CharacterAdded:Connect(function()
+    clearCaches()
+    if autoFaceEnabled then
+        startAutoFace()
+    end
+end)
+
+local ComboTab = Window:Tab({ Title = "东堂", Icon = "swords", Locked = false })
+
+local comboEnabled = false
+local comboThread = nil
+local comboRange = 18
+local comboCallDelay = 0.35
+local comboLoopDelay = 0.3
+local comboOrder = "右键→左键"
+local COMBO_TARGET_CACHE_TIME = 0.1
+local comboCharactersFolder = nil
+local comboCacheTarget = nil
+local comboCacheTime = 0
+local hotkeyCombo = nil
+
+local function getCharactersFolder()
+    if useCache and comboCharactersFolder and comboCharactersFolder.Parent then
+        return comboCharactersFolder
+    end
+    comboCharactersFolder = Workspace:FindFirstChild("Characters")
+    return comboCharactersFolder
+end
+
+local function scanNearestCharacter()
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return nil end
+    local folder = getCharactersFolder()
+    if not folder then return nil end
+
+    local best, minDist = nil, comboRange
+    for _, model in ipairs(folder:GetChildren()) do
+        if model:IsA("Model") and model ~= char then
+            local hum = model:FindFirstChildOfClass("Humanoid")
+            local tr = model:FindFirstChild("HumanoidRootPart")
+            if hum and hum.Health > 0 and tr then
+                local d = (root.Position - tr.Position).Magnitude
+                if d < minDist then
+                    minDist = d
+                    best = model
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function getNearestCharacter()
+    if not useCache then
+        return scanNearestCharacter()
+    end
+    local now = os.clock()
+    if comboCacheTarget and comboCacheTarget.Parent and (now - comboCacheTime) < COMBO_TARGET_CACHE_TIME then
+        local hum = comboCacheTarget:FindFirstChildOfClass("Humanoid")
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local tr = comboCacheTarget:FindFirstChild("HumanoidRootPart")
+        if hum and hum.Health > 0 and root and tr then
+            if (root.Position - tr.Position).Magnitude <= comboRange then
+                return comboCacheTarget
+            end
+        end
+    end
+    comboCacheTarget = scanNearestCharacter()
+    comboCacheTime = now
+    return comboCacheTarget
+end
+
+local function fireActive(target)
+    local remote = getRemote("TodoService", "Activated")
+    if not remote or not target then return false end
+    if not canSend("todoActive", 0.02) then return false end
+    local ok = pcall(function()
+        remote:FireServer(false, target)
+    end)
+    return ok
+end
+
+local function fireRight(target)
+    local remote = getRemote("TodoService", "RightActivated")
+    if not remote or not target then return false end
+    if not canSend("todoRight", 0.02) then return false end
+    local ok = pcall(function()
+        remote:FireServer(target)
+    end)
+    return ok
+end
+
+local function attackOnce()
+    local target = getNearestCharacter()
+    if not target then return false end
+
+    if comboOrder == "右键→左键" then
+        fireRight(target)
+        if comboCallDelay > 0 then task.wait(comboCallDelay) end
+        fireActive(target)
+    elseif comboOrder == "左键→右键" then
+        fireActive(target)
+        if comboCallDelay > 0 then task.wait(comboCallDelay) end
+        fireRight(target)
+    else
+        fireActive(target)
+        if comboCallDelay > 0 then task.wait(comboCallDelay) end
+        fireActive(target)
+        if comboCallDelay > 0 then task.wait(comboCallDelay) end
+        fireRight(target)
+    end
+
+    return true
+end
+
+local function refreshComboHotkey()
+    if hotkeyCombo then hotkeyCombo.refresh() end
+end
+
+local function stopCombo()
+    comboEnabled = false
+    if comboThread then
+        task.cancel(comboThread)
+        comboThread = nil
+    end
+    comboCacheTarget = nil
+    refreshComboHotkey()
+end
+
+local function startCombo()
+    if not getRemote("TodoService", "Activated") and not getRemote("TodoService", "RightActivated") then
+        WindUI:Notify({ Title = "错误", Content = "未找到 TodoService 远程事件", Icon = "x", Duration = 2 })
+        return false
+    end
+    stopCombo()
+    comboEnabled = true
+
+    comboThread = task.spawn(function()
+        while comboEnabled do
+            if not attackOnce() then
+                task.wait(0.1)
+            end
+            task.wait(comboLoopDelay)
+        end
+        comboThread = nil
+    end)
+
+    refreshComboHotkey()
+    return true
+end
+
+hotkeyCombo = createFloatingHotkey({
+    guiName = "IdknameggTodoHotkey",
+    defaultPos = UDim2.new(0, 16, 0.78, 0),
+    getState = function() return comboEnabled end,
+    onToggle = function()
+        if comboEnabled then
+            stopCombo()
+        else
+            startCombo()
+        end
+    end
+})
+
+ComboTab:Paragraph({
+    Title = "东堂：自动锁定范围内最近角色，按所选顺序出招；角色容器与最近目标已走缓存",
+    Image = "swords",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+ComboTab:Toggle({
+    Title = "自动连招",
+    Type = "Checkbox",
+    Default = false,
+    Callback = function(state)
+        if state then
+            startCombo()
+        else
+            stopCombo()
+        end
+    end
+})
+
+ComboTab:Dropdown({
+    Title = "出招顺序",
+    Values = { "右键→左键", "左键→右键", "左键→左键→右键" },
+    Value = "右键→左键",
+    Callback = function(option)
+        comboOrder = option
+        WindUI:Notify({ Title = "出招顺序", Content = "已切换为: " .. option, Duration = 1.5 })
+    end
+})
+
+ComboTab:Slider({
+    Title = "攻击范围",
+    Step = 0.5,
+    Value = { Min = 2, Max = 60, Default = 18 },
+    Callback = function(val)
+        comboRange = val
+        comboCacheTarget = nil
+    end
+})
+
+ComboTab:Slider({
+    Title = "每招间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0, Max = 1, Default = 0.35 },
+    Callback = function(val) comboCallDelay = val end
+})
+
+ComboTab:Slider({
+    Title = "循环间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0.01, Max = 3, Default = 0.3 },
+    Callback = function(val) comboLoopDelay = val end
+})
+
+ComboTab:Slider({
+    Title = "目标缓存刷新(秒)",
+    Desc = "越大越省性能，越小选人越跟手",
+    Step = 0.01,
+    Value = { Min = 0.02, Max = 0.5, Default = 0.1 },
+    Callback = function(val)
+        COMBO_TARGET_CACHE_TIME = val
+        comboCacheTarget = nil
+    end
+})
+
+ComboTab:Toggle({
+    Title = "启用东堂缓存",
+    Desc = "关闭后每轮都重新扫描 Characters 与远程",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        useCache = state
+        clearCaches()
+        comboCharactersFolder = nil
+        comboCacheTarget = nil
+        WindUI:Notify({ Title = "缓存", Content = state and "已启用" or "已关闭", Duration = 1.5 })
+    end
+})
+
+ComboTab:Button({
+    Title = "清空缓存并重新获取",
+    Callback = function()
+        clearCaches()
+        comboCharactersFolder = nil
+        comboCacheTarget = nil
+        WindUI:Notify({ Title = "缓存", Content = "已清空，下次使用会重新获取", Duration = 1.5 })
+    end
+})
+
+ComboTab:Button({
+    Title = "套用推荐值(0.35 / 0.3)",
+    Callback = function()
+        comboCallDelay = 0.35
+        comboLoopDelay = 0.3
+    end
+})
+
+ComboTab:Toggle({
+    Title = "显示东堂快捷键",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        if hotkeyCombo then hotkeyCombo.setVisible(state) end
+    end
+})
+
+ComboTab:Toggle({
+    Title = "固定东堂快捷键位置",
+    Desc = "开启后不可拖动，位置锁死在当前处",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        if hotkeyCombo then hotkeyCombo.setFixed(state) end
+    end
+})
+
+ComboTab:Button({
+    Title = "东堂快捷键位置复位",
+    Callback = function()
+        if hotkeyCombo then hotkeyCombo.reset() end
+    end
+})
+
+ComboTab:Button({
+    Title = "列出范围内角色",
+    Callback = function()
+        local folder = getCharactersFolder()
+        if not folder then
+            WindUI:Notify({ Title = "提示", Content = "未找到 workspace.Characters", Icon = "x", Duration = 2 })
+            return
+        end
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local list = {}
+        for _, model in ipairs(folder:GetChildren()) do
+            if model:IsA("Model") and model ~= char then
+                local hum = model:FindFirstChildOfClass("Humanoid")
+                local tr = model:FindFirstChild("HumanoidRootPart")
+                if hum and tr and hum.Health > 0 then
+                    local d = root and (root.Position - tr.Position).Magnitude or 0
+                    if d <= comboRange then
+                        table.insert(list, string.format("%s  血量=%d  距离=%.1f", model.Name, math.floor(hum.Health), d))
+                    end
+                end
+            end
+        end
+        if #list == 0 then
+            WindUI:Notify({ Title = "范围内角色", Content = "没有符合条件的角色", Duration = 3 })
+        else
+            print(table.concat(list, "\n"))
+            WindUI:Notify({ Title = "范围内角色", Content = string.format("共 %d 个，已输出控制台", #list), Duration = 3 })
+        end
+    end
+})
+
+local function getNearestByMode(range, mode)
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return nil end
+
+    local best, minDist = nil, range
+
+    local function consider(model)
+        if not model or model == char then return end
+        local hum = model:FindFirstChildOfClass("Humanoid")
+        local tr = model:FindFirstChild("HumanoidRootPart")
+        if not (hum and hum.Health > 0 and tr) then return end
+        local isPlayer = Players:GetPlayerFromCharacter(model) ~= nil
+        if isPlayer and mode == "仅NPC" then return end
+        if (not isPlayer) and mode == "仅玩家" then return end
+        local d = (root.Position - tr.Position).Magnitude
+        if d < minDist then
+            minDist = d
+            best = model
+        end
+    end
+
+    local folder = getCharactersFolder()
+    if folder then
+        for _, model in ipairs(folder:GetChildren()) do
+            if model:IsA("Model") then consider(model) end
+        end
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            consider(plr.Character)
+        end
+    end
+    return best
+end
+
+local function teleportBehindModel(model, dist, doFace)
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local tr = model and model:FindFirstChild("HumanoidRootPart")
+    if not (root and tr) then return false end
+
+    local newPos = (tr.CFrame * CFrame.new(0, 0, dist)).Position
+    if doFace then
+        root.CFrame = CFrame.lookAt(newPos, Vector3.new(tr.Position.X, newPos.Y, tr.Position.Z))
+    else
+        root.CFrame = CFrame.new(newPos)
+    end
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+    return true
+end
+
+local ResoluteTab = Window:Tab({ Title = "乙骨", Icon = "slash", Locked = false })
+
+local resoluteEnabled = false
+local resoluteThread = nil
+local resoluteMode = "玩家和NPC"
+local resoluteRange = 25
+local resoluteBackDist = 4.3
+local resoluteFireDelay = 0.35
+local resoluteLoopDelay = 0.3
+local resoluteReTeleport = true
+local resoluteFace = true
+local resolutePosMode = "自身位置"
+local resoluteCount = 0
+local resoluteTargetName = "无"
+local resoluteLabel
+local hotkeyResolute = nil
+
+local function fireResolute(model)
+    local remote = getRemote("ResoluteSwingService", "Activated")
+    if not remote or not model then return false end
+    local moveset = getMovesetChild("Resolute Slash")
+    if not moveset then return false end
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local tr = model:FindFirstChild("HumanoidRootPart")
+    if not (root and tr) then return false end
+    if not canSend("resolute", 0.02) then return false end
+
+    local pos
+    if resolutePosMode == "目标位置" then
+        pos = tr.Position
+    else
+        pos = root.Position
+    end
+
+    local okFire = pcall(function()
+        remote:FireServer(moveset, {
+            false,
+            model,
+            pos,
+            Vector3.new(0, 0, 0)
+        })
+    end)
+    if okFire then
+        resoluteCount = resoluteCount + 1
+    end
+    return okFire
+end
+
+local function refreshResoluteHotkey()
+    if hotkeyResolute then hotkeyResolute.refresh() end
+end
+
+local function refreshResoluteLabel()
+    if not resoluteLabel then return end
+    local lines = {}
+    table.insert(lines, "运行状态: " .. (resoluteEnabled and "开启" or "关闭"))
+    table.insert(lines, "目标类型: " .. resoluteMode)
+    table.insert(lines, string.format("搜索范围: %.1f", resoluteRange))
+    table.insert(lines, string.format("身后距离: %.2f", resoluteBackDist))
+    table.insert(lines, string.format("两次触发间隔: %.3f 秒", resoluteFireDelay))
+    table.insert(lines, string.format("循环间隔: %.3f 秒", resoluteLoopDelay))
+    table.insert(lines, "两次之间重新瞬移: " .. (resoluteReTeleport and "开" or "关"))
+    table.insert(lines, "瞬移后朝向: " .. (resoluteFace and "开" or "关"))
+    table.insert(lines, "坐标参数: " .. resolutePosMode)
+    table.insert(lines, "最近目标: " .. resoluteTargetName)
+    table.insert(lines, "触发次数: " .. tostring(resoluteCount))
+    pcall(function()
+        resoluteLabel:SetTitle(table.concat(lines, "\n"))
+    end)
+end
+
+local function stopResolute()
+    resoluteEnabled = false
+    if resoluteThread then
+        task.cancel(resoluteThread)
+        resoluteThread = nil
+    end
+    refreshResoluteHotkey()
+    refreshResoluteLabel()
+end
+
+local function resoluteCycle()
+    local target = getNearestByMode(resoluteRange, resoluteMode)
+    if not target then return false end
+    resoluteTargetName = target.Name
+
+    teleportBehindModel(target, resoluteBackDist, resoluteFace)
+    fireResolute(target)
+
+    if not resoluteEnabled then return true end
+    if resoluteFireDelay > 0 then task.wait(resoluteFireDelay) end
+    if not resoluteEnabled then return true end
+
+    if resoluteReTeleport then
+        teleportBehindModel(target, resoluteBackDist, resoluteFace)
+    end
+    fireResolute(target)
+    refreshResoluteLabel()
+    return true
+end
+
+local function startResolute()
+    if not getRemote("ResoluteSwingService", "Activated") then
+        WindUI:Notify({ Title = "错误", Content = "未找到 ResoluteSwingService 远程事件", Icon = "x", Duration = 2 })
+        return false
+    end
+    if not getMovesetChild("Resolute Slash") then
+        WindUI:Notify({ Title = "错误", Content = "角色没有 Moveset.Resolute Slash", Icon = "x", Duration = 2 })
+        return false
+    end
+
+    stopResolute()
+    resoluteEnabled = true
+    resoluteCount = 0
+    resoluteTargetName = "无"
+
+    resoluteThread = task.spawn(function()
+        while resoluteEnabled do
+            if not resoluteCycle() then
+                task.wait(0.1)
+            end
+            task.wait(resoluteLoopDelay)
+        end
+        resoluteThread = nil
+    end)
+
+    refreshResoluteHotkey()
+    refreshResoluteLabel()
+    return true
+end
+
+hotkeyResolute = createFloatingHotkey({
+    guiName = "IdknameggYutaHotkey",
+    defaultPos = UDim2.new(0, 76, 0.78, 0),
+    getState = function() return resoluteEnabled end,
+    onToggle = function()
+        if resoluteEnabled then stopResolute() else startResolute() end
+    end
+})
+
+ResoluteTab:Paragraph({
+    Title = "乙骨：自动锁定最近玩家/NPC，瞬移到他身后，连放两次 Resolute Slash",
+    Image = "slash",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+resoluteLabel = ResoluteTab:Paragraph({
+    Title = "开启后显示实时统计",
+    Image = "activity",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+ResoluteTab:Toggle({
+    Title = "自动瞬后双斩",
+    Type = "Checkbox",
+    Default = false,
+    Callback = function(state)
+        if state then startResolute() else stopResolute() end
+    end
+})
+
+ResoluteTab:Dropdown({
+    Title = "目标类型",
+    Values = { "仅玩家", "仅NPC", "玩家和NPC" },
+    Value = "玩家和NPC",
+    Callback = function(option)
+        resoluteMode = option
+        refreshResoluteLabel()
+    end
+})
+
+ResoluteTab:Button({
+    Title = "打一次(瞬后双斩)",
+    Callback = function()
+        if resoluteCycle() then
+            refreshResoluteLabel()
+        else
+            WindUI:Notify({ Title = "提示", Content = "范围内没有可用目标", Icon = "x", Duration = 2 })
+        end
+    end
+})
+
+ResoluteTab:Slider({
+    Title = "搜索范围",
+    Step = 0.5,
+    Value = { Min = 2, Max = 80, Default = 25 },
+    Callback = function(val) resoluteRange = val; refreshResoluteLabel() end
+})
+
+ResoluteTab:Slider({
+    Title = "身后距离",
+    Step = 0.1,
+    Value = { Min = 1, Max = 10, Default = 4.3 },
+    Callback = function(val) resoluteBackDist = val; refreshResoluteLabel() end
+})
+
+ResoluteTab:Slider({
+    Title = "两次触发间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0.05, Max = 1.5, Default = 0.35 },
+    Callback = function(val) resoluteFireDelay = val; refreshResoluteLabel() end
+})
+
+ResoluteTab:Slider({
+    Title = "循环间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0.01, Max = 3, Default = 0.3 },
+    Callback = function(val) resoluteLoopDelay = val; refreshResoluteLabel() end
+})
+
+ResoluteTab:Toggle({
+    Title = "两次之间重新瞬移",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        resoluteReTeleport = state
+        refreshResoluteLabel()
+    end
+})
+
+ResoluteTab:Toggle({
+    Title = "瞬移后朝向目标",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        resoluteFace = state
+        refreshResoluteLabel()
+    end
+})
+
+ResoluteTab:Dropdown({
+    Title = "坐标参数来源",
+    Values = { "自身位置", "目标位置" },
+    Value = "自身位置",
+    Callback = function(option)
+        resolutePosMode = option
+        refreshResoluteLabel()
+    end
+})
+
+ResoluteTab:Toggle({
+    Title = "显示乙骨快捷键",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        if hotkeyResolute then hotkeyResolute.setVisible(state) end
+    end
+})
+
+ResoluteTab:Toggle({
+    Title = "固定乙骨快捷键位置",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        if hotkeyResolute then hotkeyResolute.setFixed(state) end
+    end
+})
+
+ResoluteTab:Button({
+    Title = "乙骨快捷键位置复位",
+    Callback = function()
+        if hotkeyResolute then hotkeyResolute.reset() end
+    end
+})
+
+ResoluteTab:Button({
+    Title = "套用推荐值(0.35 / 0.3)",
+    Callback = function()
+        resoluteFireDelay = 0.35
+        resoluteLoopDelay = 0.3
+        refreshResoluteLabel()
+    end
+})
+
+ResoluteTab:Button({
+    Title = "检查远程与招式",
+    Callback = function()
+        local lines = {}
+        table.insert(lines, "ResoluteEvent: " .. (getRemote("ResoluteSwingService", "Activated") and "已找到" or "缺失"))
+        table.insert(lines, "Moveset.Resolute Slash: " .. (getMovesetChild("Resolute Slash") and "已找到" or "缺失"))
+        print(table.concat(lines, "\n"))
+        WindUI:Notify({ Title = "检查结果", Content = table.concat(lines, " / "), Duration = 3 })
+    end
+})
+
+local WindTab = Window:Tab({ Title = "乙骨的四技能抓", Icon = "wind", Locked = false })
+
+local windEnabled = false
+local windThread = nil
+local windMode = "仅玩家"
+local windRange = 25
+local windBackDist = 4.3
+local windLoopDelay = 0.3
+local windFace = true
+local windCount = 0
+local windTargetName = "无"
+local windLabel
+local hotkeyWind = nil
+
+local function fireSecondWind()
+    local remote = getRemote("SecondWindService", "Activated")
+    if not remote then return false end
+    local moveset = getMovesetChild("Second Wind")
+    if not moveset then return false end
+    if not canSend("wind", 0.02) then return false end
+    local okFire = pcall(function()
+        remote:FireServer(moveset, nil)
+    end)
+    if okFire then
+        windCount = windCount + 1
+    end
+    return okFire
+end
+
+local function refreshWindHotkey()
+    if hotkeyWind then hotkeyWind.refresh() end
+end
+
+local function refreshWindLabel()
+    if not windLabel then return end
+    local lines = {}
+    table.insert(lines, "运行状态: " .. (windEnabled and "开启" or "关闭"))
+    table.insert(lines, "目标类型: " .. windMode)
+    table.insert(lines, string.format("搜索范围: %.1f", windRange))
+    table.insert(lines, string.format("身后距离: %.2f", windBackDist))
+    table.insert(lines, string.format("循环间隔: %.3f 秒", windLoopDelay))
+    table.insert(lines, "瞬移后朝向: " .. (windFace and "开" or "关"))
+    table.insert(lines, "最近目标: " .. windTargetName)
+    table.insert(lines, "触发次数: " .. tostring(windCount))
+    pcall(function()
+        windLabel:SetTitle(table.concat(lines, "\n"))
+    end)
+end
+
+local function stopWind()
+    windEnabled = false
+    if windThread then
+        task.cancel(windThread)
+        windThread = nil
+    end
+    refreshWindHotkey()
+    refreshWindLabel()
+end
+
+local function windCycle()
+    local target = getNearestByMode(windRange, windMode)
+    if not target then return false end
+    windTargetName = target.Name
+    teleportBehindModel(target, windBackDist, windFace)
+    fireSecondWind()
+    refreshWindLabel()
+    return true
+end
+
+local function startWind()
+    if not getRemote("SecondWindService", "Activated") then
+        WindUI:Notify({ Title = "错误", Content = "未找到 SecondWindService 远程事件", Icon = "x", Duration = 2 })
+        return false
+    end
+    if not getMovesetChild("Second Wind") then
+        WindUI:Notify({ Title = "错误", Content = "角色没有 Moveset.Second Wind", Icon = "x", Duration = 2 })
+        return false
+    end
+
+    stopWind()
+    windEnabled = true
+    windCount = 0
+    windTargetName = "无"
+
+    windThread = task.spawn(function()
+        while windEnabled do
+            if not windCycle() then
+                task.wait(0.1)
+            end
+            task.wait(windLoopDelay)
+        end
+        windThread = nil
+    end)
+
+    refreshWindHotkey()
+    refreshWindLabel()
+    return true
+end
+
+hotkeyWind = createFloatingHotkey({
+    guiName = "IdknameggWindHotkey",
+    defaultPos = UDim2.new(0, 136, 0.78, 0),
+    getState = function() return windEnabled end,
+    onToggle = function()
+        if windEnabled then stopWind() else startWind() end
+    end
+})
+
+WindTab:Paragraph({
+    Title = "乙骨的四技能抓：自动锁定最近目标，瞬移到他身后再释放",
+    Image = "wind",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+windLabel = WindTab:Paragraph({
+    Title = "开启后显示实时统计",
+    Image = "activity",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+WindTab:Toggle({
+    Title = "自动瞬后释放",
+    Type = "Checkbox",
+    Default = false,
+    Callback = function(state)
+        if state then startWind() else stopWind() end
+    end
+})
+
+WindTab:Dropdown({
+    Title = "目标类型",
+    Values = { "仅玩家", "仅NPC", "玩家和NPC" },
+    Value = "仅玩家",
+    Callback = function(option)
+        windMode = option
+        refreshWindLabel()
+    end
+})
+
+WindTab:Button({
+    Title = "打一次(瞬后释放)",
+    Callback = function()
+        if windCycle() then
+            refreshWindLabel()
+        else
+            WindUI:Notify({ Title = "提示", Content = "范围内没有可用目标", Icon = "x", Duration = 2 })
+        end
+    end
+})
+
+WindTab:Slider({
+    Title = "搜索范围",
+    Step = 0.5,
+    Value = { Min = 2, Max = 80, Default = 25 },
+    Callback = function(val) windRange = val; refreshWindLabel() end
+})
+
+WindTab:Slider({
+    Title = "身后距离",
+    Step = 0.1,
+    Value = { Min = 1, Max = 10, Default = 4.3 },
+    Callback = function(val) windBackDist = val; refreshWindLabel() end
+})
+
+WindTab:Slider({
+    Title = "循环间隔(秒)",
+    Step = 0.01,
+    Value = { Min = 0.01, Max = 3, Default = 0.3 },
+    Callback = function(val) windLoopDelay = val; refreshWindLabel() end
+})
+
+WindTab:Toggle({
+    Title = "瞬移后朝向目标",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        windFace = state
+        refreshWindLabel()
+    end
+})
+
+WindTab:Toggle({
+    Title = "显示四技能抓快捷键",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        if hotkeyWind then hotkeyWind.setVisible(state) end
+    end
+})
+
+WindTab:Toggle({
+    Title = "固定四技能抓快捷键位置",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        if hotkeyWind then hotkeyWind.setFixed(state) end
+    end
+})
+
+WindTab:Button({
+    Title = "四技能抓快捷键位置复位",
+    Callback = function()
+        if hotkeyWind then hotkeyWind.reset() end
+    end
+})
+
+WindTab:Button({
+    Title = "检查远程与招式",
+    Callback = function()
+        local lines = {}
+        table.insert(lines, "SecondWindEvent: " .. (getRemote("SecondWindService", "Activated") and "已找到" or "缺失"))
+        table.insert(lines, "Moveset.Second Wind: " .. (getMovesetChild("Second Wind") and "已找到" or "缺失"))
+        print(table.concat(lines, "\n"))
+        WindUI:Notify({ Title = "检查结果", Content = table.concat(lines, " / "), Duration = 3 })
+    end
+})
+
+local PingTab = Window:Tab({ Title = "Ping", Icon = "activity", Locked = false })
+
+local showHUD = true
+local showPingText = true
+local showFPSText = true
+local hudStyle = "我的世界"
+local hudTextSize = 22
+local hudOffsetX = -16
+local hudOffsetY = 12
+local hudRefresh = 0.5
+local hudColorByPing = true
+local hudOutline = true
+local hudShadow = true
+local hudShowBox = true
+
+local hudGui, hudBox, hudStroke, hudBadge
+local hudPingLabel, hudFpsLabel, hudPingShadow, hudFpsShadow
+local pingValue = nil
+local fpsValue = 60
+
+local function toHex(c)
+    return string.format("#%02X%02X%02X",
+        math.floor(math.clamp(c.R * 255, 0, 255)),
+        math.floor(math.clamp(c.G * 255, 0, 255)),
+        math.floor(math.clamp(c.B * 255, 0, 255)))
+end
+
+local function readPing()
+    local sources = {
+        function()
+            return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+        end,
+        function()
+            return Stats.Network.ServerStatsItem:FindFirstChild("Data Ping").Value
+        end,
+        function()
+            return Stats.Network:FindFirstChild("ServerStatsItem"):FindFirstChild("Data Ping").Value
+        end
+    }
+    for _, fn in ipairs(sources) do
+        local ok, val = pcall(fn)
+        if ok and tonumber(val) and tonumber(val) >= 0 then
+            return math.floor(tonumber(val))
+        end
+    end
+    return nil
+end
+
+local function getStyle()
+    if hudStyle == "我的世界" then
+        return {
+            bg = Color3.fromRGB(0, 0, 0),
+            gradient = nil,
+            bgTransparency = hudShowBox and 0.55 or 1,
+            pingColor = Color3.fromRGB(255, 130, 205),
+            fpsColor = Color3.fromRGB(255, 130, 205),
+            font = Enum.Font.Arcade,
+            corner = UDim.new(0, 2),
+            strokeColor = Color3.fromRGB(255, 255, 255),
+            strokeTransparency = 1,
+            thickness = 0,
+            tagColor = "#FFC6E6",
+            textStrokeColor = Color3.fromRGB(45, 0, 35),
+            textStrokeTransparency = hudOutline and 0 or 1,
+            shadowColor = Color3.fromRGB(110, 0, 70),
+            shadowTransparency = hudShadow and 0.15 or 1
+        }
+    elseif hudStyle == "GTA5" then
+        return {
+            bg = Color3.fromRGB(0, 0, 0),
+            gradient = nil,
+            bgTransparency = 0.45,
+            pingColor = Color3.fromRGB(127, 216, 88),
+            fpsColor = Color3.fromRGB(240, 240, 240),
+            font = Enum.Font.LuckiestGuy,
+            corner = UDim.new(0, 4),
+            strokeColor = Color3.fromRGB(127, 216, 88),
+            strokeTransparency = 0.35,
+            thickness = 1,
+            tagColor = "#7FD858",
+            textStrokeColor = Color3.fromRGB(0, 0, 0),
+            textStrokeTransparency = 0.6,
+            shadowColor = Color3.fromRGB(0, 0, 0),
+            shadowTransparency = 1
+        }
+    else
+        return {
+            bg = Color3.fromRGB(0, 0, 0),
+            gradient = nil,
+            bgTransparency = 0.5,
+            pingColor = Color3.fromRGB(255, 255, 255),
+            fpsColor = Color3.fromRGB(200, 200, 200),
+            font = Enum.Font.Code,
+            corner = UDim.new(0, 2),
+            strokeColor = Color3.fromRGB(120, 120, 120),
+            strokeTransparency = 0.7,
+            thickness = 1,
+            tagColor = "#8A8A8A",
+            textStrokeColor = Color3.fromRGB(0, 0, 0),
+            textStrokeTransparency = 0.6,
+            shadowColor = Color3.fromRGB(0, 0, 0),
+            shadowTransparency = 1
+        }
+    end
+end
+
+local function updateLayout()
+    if not hudBox then return end
+
+    hudGui.Enabled = showHUD
+
+    local w = 178
+    local rowH = 28
+    local padLeft = 14
+
+    local rows = 0
+    if showPingText then rows = rows + 1 end
+    if showFPSText then rows = rows + 1 end
+
+    local h = 34
+    if rows == 2 then h = 62 end
+
+    hudBox.Size = UDim2.fromOffset(w, h)
+
+    local y1 = 4
+    local y2 = 4 + rowH
+
+    hudPingLabel.Visible = showPingText
+    hudFpsLabel.Visible = showFPSText
+
+    if showPingText and showFPSText then
+        hudPingLabel.Position = UDim2.new(0, padLeft, 0, y1)
+        hudFpsLabel.Position = UDim2.new(0, padLeft, 0, y2)
+    elseif showPingText then
+        hudPingLabel.Position = UDim2.new(0, padLeft, 0, 3)
+    elseif showFPSText then
+        hudFpsLabel.Position = UDim2.new(0, padLeft, 0, 3)
+    end
+
+    hudPingLabel.Size = UDim2.new(1, -padLeft - 8, 0, rowH)
+    hudFpsLabel.Size = UDim2.new(1, -padLeft - 8, 0, rowH)
+
+    if hudPingShadow then
+        hudPingShadow.Position = UDim2.new(0, padLeft + 2, 0, hudPingLabel.Position.Y.Offset + 2)
+        hudPingShadow.Size = hudPingLabel.Size
+        hudPingShadow.Visible = showPingText
+    end
+
+    if hudFpsShadow then
+        hudFpsShadow.Position = UDim2.new(0, padLeft + 2, 0, hudFpsLabel.Position.Y.Offset + 2)
+        hudFpsShadow.Size = hudFpsLabel.Size
+        hudFpsShadow.Visible = showFPSText
+    end
+
+    if hudBadge then
+        hudBadge.Visible = (hudStyle == "GTA5")
+    end
+end
+
+local function applyHudStyle()
+    if not hudBox then return end
+
+    local st = getStyle()
+
+    hudBox.BackgroundColor3 = st.bg
+    hudBox.BackgroundTransparency = st.bgTransparency
+    hudBox.Position = UDim2.new(1, hudOffsetX, 0, hudOffsetY)
+    hudBox.Rotation = 0
+
+    local grad = hudBox:FindFirstChildOfClass("UIGradient")
+    if grad then
+        grad.Color = ColorSequence.new(st.bg, st.bg)
+    end
+
+    local corner = hudBox:FindFirstChildOfClass("UICorner")
+    if corner then
+        corner.CornerRadius = st.corner
+    end
+
+    if hudStroke then
+        hudStroke.Color = st.strokeColor
+        hudStroke.Transparency = st.strokeTransparency
+        hudStroke.Thickness = st.thickness
+    end
+
+    for _, label in ipairs({ hudPingLabel, hudFpsLabel }) do
+        if label then
+            label.Font = st.font
+            label.TextSize = hudTextSize
+            label.TextStrokeColor3 = st.textStrokeColor
+            label.TextStrokeTransparency = st.textStrokeTransparency
+            label.RichText = true
+        end
+    end
+
+    for _, label in ipairs({ hudPingShadow, hudFpsShadow }) do
+        if label then
+            label.Font = st.font
+            label.TextSize = hudTextSize
+            label.TextColor3 = st.shadowColor
+            label.TextTransparency = st.shadowTransparency
+            label.TextStrokeTransparency = 1
+            label.RichText = false
+        end
+    end
+
+    if hudPingLabel then hudPingLabel.TextColor3 = st.pingColor end
+    if hudFpsLabel then hudFpsLabel.TextColor3 = st.fpsColor end
+
+    updateLayout()
+end
+
+local function pingDisplayColor()
+    local base = toHex(getStyle().pingColor)
+    if not pingValue then return base end
+    if not hudColorByPing then return base end
+    if pingValue <= 80 then
+        return base
+    elseif pingValue <= 150 then
+        return "#FFE96B"
+    else
+        return "#FF4D6D"
+    end
+end
+
+local function refreshHudText()
+    local st = getStyle()
+    local tagColor = st.tagColor
+    local valText = pingValue and (tostring(pingValue) .. " ms") or "--"
+
+    if hudPingLabel then
+        hudPingLabel.Text = string.format('<font color="%s">PING</font>  <font color="%s">%s</font>', tagColor, pingDisplayColor(), valText)
+    end
+
+    if hudPingShadow then
+        hudPingShadow.Text = string.format("PING  %s", valText)
+    end
+
+    if hudFpsLabel then
+        hudFpsLabel.Text = string.format('<font color="%s">FPS</font>  <font color="%s">%d</font>', tagColor, toHex(st.fpsColor), math.floor(fpsValue))
+    end
+
+    if hudFpsShadow then
+        hudFpsShadow.Text = string.format("FPS  %d", math.floor(fpsValue))
+    end
+end
+
+local function buildHud()
+    if hudGui then
+        hudGui:Destroy()
+        hudGui = nil
+    end
+
+    hudGui = Instance.new("ScreenGui")
+    hudGui.Name = "IdknameggPingHUD"
+    hudGui.ResetOnSpawn = false
+    hudGui.IgnoreGuiInset = true
+    hudGui.DisplayOrder = 500
+    hudGui.Parent = PlayerGui
+
+    hudBox = Instance.new("Frame")
+    hudBox.Name = "PingBox"
+    hudBox.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    hudBox.BackgroundTransparency = 0.55
+    hudBox.BorderSizePixel = 0
+    hudBox.Size = UDim2.fromOffset(178, 62)
+    hudBox.Position = UDim2.new(1, hudOffsetX, 0, hudOffsetY)
+    hudBox.AnchorPoint = Vector2.new(1, 0)
+    hudBox.Parent = hudGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 2)
+    corner.Parent = hudBox
+
+    hudStroke = Instance.new("UIStroke")
+    hudStroke.Thickness = 0
+    hudStroke.Color = Color3.fromRGB(255, 255, 255)
+    hudStroke.Transparency = 1
+    hudStroke.Parent = hudBox
+
+    hudPingShadow = Instance.new("TextLabel")
+    hudPingShadow.Name = "PingShadow"
+    hudPingShadow.BackgroundTransparency = 1
+    hudPingShadow.Size = UDim2.new(1, -22, 0, 28)
+    hudPingShadow.Position = UDim2.new(0, 16, 0, 6)
+    hudPingShadow.Text = "PING  --"
+    hudPingShadow.TextColor3 = Color3.fromRGB(110, 0, 70)
+    hudPingShadow.TextTransparency = 0.15
+    hudPingShadow.TextXAlignment = Enum.TextXAlignment.Left
+    hudPingShadow.Font = Enum.Font.Arcade
+    hudPingShadow.TextSize = hudTextSize
+    hudPingShadow.ZIndex = 1
+    hudPingShadow.Parent = hudBox
+
+    hudFpsShadow = Instance.new("TextLabel")
+    hudFpsShadow.Name = "FpsShadow"
+    hudFpsShadow.BackgroundTransparency = 1
+    hudFpsShadow.Size = UDim2.new(1, -22, 0, 28)
+    hudFpsShadow.Position = UDim2.new(0, 16, 0, 34)
+    hudFpsShadow.Text = "FPS  0"
+    hudFpsShadow.TextColor3 = Color3.fromRGB(110, 0, 70)
+    hudFpsShadow.TextTransparency = 0.15
+    hudFpsShadow.TextXAlignment = Enum.TextXAlignment.Left
+    hudFpsShadow.Font = Enum.Font.Arcade
+    hudFpsShadow.TextSize = hudTextSize
+    hudFpsShadow.ZIndex = 1
+    hudFpsShadow.Parent = hudBox
+
+    hudPingLabel = Instance.new("TextLabel")
+    hudPingLabel.Name = "PingLabel"
+    hudPingLabel.BackgroundTransparency = 1
+    hudPingLabel.Size = UDim2.new(1, -22, 0, 28)
+    hudPingLabel.Position = UDim2.new(0, 14, 0, 4)
+    hudPingLabel.Text = "PING  --"
+    hudPingLabel.TextColor3 = Color3.fromRGB(255, 130, 205)
+    hudPingLabel.TextStrokeColor3 = Color3.fromRGB(45, 0, 35)
+    hudPingLabel.TextStrokeTransparency = 0
+    hudPingLabel.TextXAlignment = Enum.TextXAlignment.Left
+    hudPingLabel.Font = Enum.Font.Arcade
+    hudPingLabel.TextSize = hudTextSize
+    hudPingLabel.RichText = true
+    hudPingLabel.ZIndex = 2
+    hudPingLabel.Parent = hudBox
+
+    hudFpsLabel = Instance.new("TextLabel")
+    hudFpsLabel.Name = "FpsLabel"
+    hudFpsLabel.BackgroundTransparency = 1
+    hudFpsLabel.Size = UDim2.new(1, -22, 0, 28)
+    hudFpsLabel.Position = UDim2.new(0, 14, 0, 32)
+    hudFpsLabel.Text = "FPS  0"
+    hudFpsLabel.TextColor3 = Color3.fromRGB(255, 130, 205)
+    hudFpsLabel.TextStrokeColor3 = Color3.fromRGB(45, 0, 35)
+    hudFpsLabel.TextStrokeTransparency = 0
+    hudFpsLabel.TextXAlignment = Enum.TextXAlignment.Left
+    hudFpsLabel.Font = Enum.Font.Arcade
+    hudFpsLabel.TextSize = hudTextSize
+    hudFpsLabel.RichText = true
+    hudFpsLabel.ZIndex = 2
+    hudFpsLabel.Parent = hudBox
+
+    hudBadge = Instance.new("TextLabel")
+    hudBadge.Name = "Badge"
+    hudBadge.BackgroundTransparency = 1
+    hudBadge.Size = UDim2.fromOffset(30, 26)
+    hudBadge.Position = UDim2.new(1, -32, 1, -26)
+    hudBadge.Text = ""
+    hudBadge.TextColor3 = Color3.fromRGB(255, 255, 255)
+    hudBadge.Font = Enum.Font.LuckiestGuy
+    hudBadge.TextSize = 20
+    hudBadge.Visible = false
+    hudBadge.Parent = hudBox
+
+    applyHudStyle()
+    refreshHudText()
+    updateLayout()
+end
+
+buildHud()
+
+task.spawn(function()
+    local frames = 0
+    local acc = 0
+
+    RunService.RenderStepped:Connect(function(dt)
+        frames = frames + 1
+        acc = acc + dt
+        if acc >= 0.5 then
+            fpsValue = math.max(0, math.floor(frames / acc + 0.5))
+            frames = 0
+            acc = 0
+        end
+    end)
+
+    while true do
+        pingValue = readPing()
+        refreshHudText()
+        task.wait(hudRefresh)
+    end
+end)
+
+PingTab:Paragraph({
+    Title = "开机自动显示自己的 Ping 与 FPS；我的世界风格：像素字 + 粉色 + 黑紫描边 + 像素投影",
+    Image = "activity",
+    ImageSize = 18,
+    Color = "Grey"
+})
+
+PingTab:Toggle({
+    Title = "显示 Ping/FPS 面板",
+    Desc = "关闭即整块 HUD 隐藏",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        showHUD = state
+        updateLayout()
+    end
+})
+
+PingTab:Toggle({
+    Title = "显示 Ping",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        showPingText = state
+        updateLayout()
+    end
+})
+
+PingTab:Toggle({
+    Title = "显示 FPS",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        showFPSText = state
+        updateLayout()
+    end
+})
+
+PingTab:Dropdown({
+    Title = "字体风格",
+    Values = { "我的世界", "GTA5", "极简" },
+    Value = "我的世界",
+    Callback = function(option)
+        hudStyle = option
+        applyHudStyle()
+        refreshHudText()
+        WindUI:Notify({ Title = "字体", Content = "已切换为: " .. option, Duration = 1.5 })
+    end
+})
+
+PingTab:Toggle({
+    Title = "文字描边",
+    Desc = "黑紫色 1px 描边，模仿游戏内文字外框",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        hudOutline = state
+        applyHudStyle()
+    end
+})
+
+PingTab:Toggle({
+    Title = "像素投影",
+    Desc = "右下 2px 深粉色影子，Minecraft 文字那种立体感",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        hudShadow = state
+        applyHudStyle()
+        refreshHudText()
+        updateLayout()
+    end
+})
+
+PingTab:Toggle({
+    Title = "显示底板",
+    Desc = "Minecraft 聊天框那种半透明黑底，关掉只留文字",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        hudShowBox = state
+        applyHudStyle()
+    end
+})
+
+PingTab:Toggle({
+    Title = "延迟按质量变色",
+    Desc = "80ms 内粉色，80-150ms 黄色，高于 150ms 红色",
+    Type = "Checkbox",
+    Default = true,
+    Callback = function(state)
+        hudColorByPing = state
+        refreshHudText()
+    end
+})
+
+PingTab:Slider({
+    Title = "字号",
+    Step = 1,
+    Value = { Min = 12, Max = 44, Default = 22 },
+    Callback = function(val)
+        hudTextSize = val
+        applyHudStyle()
+        refreshHudText()
+    end
+})
+
+PingTab:Slider({
+    Title = "刷新间隔(秒)",
+    Step = 0.05,
+    Value = { Min = 0.1, Max = 2, Default = 0.5 },
+    Callback = function(val)
+        hudRefresh = val
+    end
+})
+
+PingTab:Slider({
+    Title = "距右边缘(像素)",
+    Step = 1,
+    Value = { Min = -320, Max = -2, Default = -16 },
+    Callback = function(val)
+        hudOffsetX = val
+        applyHudStyle()
+    end
+})
+
+PingTab:Slider({
+    Title = "距顶边缘(像素)",
+    Step = 1,
+    Value = { Min = 2, Max = 400, Default = 12 },
+    Callback = function(val)
+        hudOffsetY = val
+        applyHudStyle()
+    end
+})
+
+PingTab:Button({
+    Title = "位置复位",
+    Callback = function()
+        hudOffsetX = -16
+        hudOffsetY = 12
+        applyHudStyle()
+    end
+})
+
+PingTab:Button({
+    Title = "重建 HUD",
+    Callback = function()
+        buildHud()
+        WindUI:Notify({ Title = "HUD", Content = "面板已重建", Duration = 1.5 })
+    end
+})
+
+PingTab:Button({
+    Title = "检查数据来源",
+    Callback = function()
+        local lines = {}
+        local source1Ok, source1 = pcall(function()
+            return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+        end)
+        local source2Ok, source2 = pcall(function()
+            return Stats.Network.ServerStatsItem:FindFirstChild("Data Ping").Value
+        end)
+        table.insert(lines, "来源1 Value: " .. ((source1Ok and tostring(source1)) or "失败"))
+        table.insert(lines, "来源2 属性: " .. ((source2Ok and tostring(source2)) or "失败"))
+        table.insert(lines, "当前显示 Ping: " .. (pingValue and tostring(pingValue) or "读不到(--)"))
+        table.insert(lines, "当前 FPS: " .. tostring(math.floor(fpsValue)))
+        table.insert(lines, "HUD 存在: " .. (hudGui and "是" or "否"))
+        table.insert(lines, "面板可见: " .. (showHUD and "是" or "否"))
+        print(table.concat(lines, "\n"))
+        WindUI:Notify({ Title = "检查结果", Content = table.concat(lines, " / "), Duration = 3 })
+    end
+})
+
+PingTab:Button({
+    Title = "强制刷新一次",
+    Callback = function()
+        pingValue = readPing()
+        refreshHudText()
+        WindUI:Notify({
+            Title = "刷新",
+            Content = pingValue and ("Ping = " .. pingValue .. " ms") or "读不到 Ping（显示 --）",
+            Duration = 2
+        })
+    end
+})
+
+task.spawn(function()
+    while true do
+        if resoluteEnabled then refreshResoluteLabel() end
+        if windEnabled then refreshWindLabel() end
+        task.wait(0.5)
+    end
+end)
