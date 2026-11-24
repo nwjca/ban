@@ -1,0 +1,1362 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+
+local ok, WindUI = pcall(function()
+	return loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+end)
+if not ok then
+	warn("[WindUI] 加载失败: " .. tostring(WindUI))
+	return
+end
+
+local COMBO_GAP  = 0.02
+local FINISH_GAP = 0.02
+local COOLDOWN   = 0.1
+
+local BLOCK_GRACE = 0.8
+local BLOCK_POLL  = 0.03
+
+local BF_SETTLE   = 0.05
+local BF_INTERVAL = 0.3
+local BF_BACK     = 3
+
+local SERVICES = {
+	"RyuService",
+	"TodoService",
+	"ChosoService",
+	"MahitoService",
+	"MegumiService",
+	"HakariService",
+	"GojoService",
+	"YutaService",
+	"ItadoriService",
+}
+
+local LOCO = { "idle", "walk", "run", "fall", "jump", "sit", "swim", "climb", "land" }
+
+local player = Players.LocalPlayer
+
+local remotes = {}
+local remoteList = {}
+local activeRemote
+local BlockActivated, BlockDeactivated
+local DivergentActivated
+local EffectsRemote
+local TodoClap, TodoSwap
+local servicesRoot
+
+local function ensureServices()
+	if servicesRoot and servicesRoot.Parent then
+		return servicesRoot
+	end
+	local knit = ReplicatedStorage:FindFirstChild("Knit")
+	if not knit then return nil end
+	local inner = knit:FindFirstChild("Knit")
+	local root = inner or knit
+	servicesRoot = root:FindFirstChild("Services")
+	return servicesRoot
+end
+
+local function resolveRemote(serviceName, remoteName)
+	local services = ensureServices()
+	if not services then return nil end
+	local svc = services:FindFirstChild(serviceName)
+	if not svc then return nil end
+	local re = svc:FindFirstChild("RE")
+	if not re then return nil end
+	return re:FindFirstChild(remoteName)
+end
+
+local function scanServices()
+	local services = ensureServices()
+	if not services then return end
+	for _, name in ipairs(SERVICES) do
+		local remote = resolveRemote(name, "Activated")
+		if remote then
+			remotes[remote] = name
+			remoteList[name] = remote
+		end
+	end
+	BlockActivated = BlockActivated or resolveRemote("BlockService", "Activated")
+	BlockDeactivated = BlockDeactivated or resolveRemote("BlockService", "Deactivated")
+	if not DivergentActivated then
+		local svc = services:FindFirstChild("DivergentFistService")
+		if svc then
+			local re = svc:FindFirstChild("RE")
+			DivergentActivated = re and re:FindFirstChild("Activated")
+		end
+	end
+	if not EffectsRemote then
+		local svc = services:FindFirstChild("DivergentFistService")
+		if svc then
+			local re = svc:FindFirstChild("RE")
+			EffectsRemote = re and re:FindFirstChild("Effects")
+		end
+	end
+	TodoClap = TodoClap or resolveRemote("TodoService", "Activated")
+	TodoSwap = TodoSwap or resolveRemote("TodoService", "RightActivated")
+end
+
+task.spawn(function()
+	for _ = 1, 20 do
+		scanServices()
+		task.wait(0.5)
+	end
+end)
+
+local function isDivergentRemote(remote)
+	if typeof(remote) ~= "Instance" then return false end
+	if DivergentActivated and remote == DivergentActivated then return true end
+	if remote.Name ~= "Activated" then return false end
+	local re = remote.Parent
+	local svc = re and re.Parent
+	if svc and type(svc.Name) == "string" and svc.Name:find("DivergentFist", 1, true) then
+		return true
+	end
+	return false
+end
+
+local FINISH_MAP = {
+	["下"] = "Down",
+	["上"] = "Up",
+}
+
+local cfg = {
+	enabled = false,
+	character = "auto",
+	finishers = { "下", "上" },
+	autoBlock = false,
+	blockRange = 5,
+	walkSpeed = 16,
+	jumpPower = 50,
+	infJump = false,
+	faceTarget = false,
+	fastInteract = false,
+	blackFlash = false,
+	chainEffect = true,
+	bfRange = 20,
+	bfHits = 2,
+	todoRange = 25,
+	autoClap = false,
+	clapSpeed = 0.25,
+	clapLeftSpeed = 0.45,
+	clapLeftTimes = 2,
+	clapLeftGap = 0.15,
+}
+
+local clapTarget, clapTargetAt = nil, 0
+
+local lastTarget, lastFire = nil, 0
+local firing, blocking, bfBusy = false, false, false
+local seq = 0
+local lastThreat, lastDamage = 0, 0
+
+local function selfRoot()
+	local char = player.Character
+	return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function isLoco(name)
+	local n = name:lower()
+	for _, k in ipairs(LOCO) do
+		if n:find(k, 1, true) then return true end
+	end
+	return false
+end
+
+local function nearestTarget(maxDist)
+	local char = player.Character
+	local hrp = selfRoot()
+	if not hrp then return nil end
+	local container = workspace:FindFirstChild("Characters") or workspace
+	local best, bestDist = nil, maxDist or math.huge
+	for _, v in ipairs(container:GetChildren()) do
+		if v:IsA("Model") and v ~= char then
+			local hum = v:FindFirstChildOfClass("Humanoid")
+			if hum and hum.Health > 0 then
+				local root = v.PrimaryPart or v:FindFirstChild("HumanoidRootPart")
+				if root then
+					local d = (root.Position - hrp.Position).Magnitude
+					if d < bestDist then
+						best, bestDist = v, d
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
+local function faceTarget(target)
+	local hrp = selfRoot()
+	local troot = target and (target.PrimaryPart or target:FindFirstChild("HumanoidRootPart"))
+	if not hrp or not troot then return false end
+	local lookAt = troot.Position - hrp.Position
+	lookAt = Vector3.new(lookAt.X, 0, lookAt.Z)
+	if lookAt.Magnitude <= 0.1 then return false end
+	hrp.CFrame = CFrame.lookAt(hrp.Position, hrp.Position + lookAt)
+	return true
+end
+
+local function teleportBehind(target)
+	local char = player.Character
+	local hrp = selfRoot()
+	local troot = target and (target.PrimaryPart or target:FindFirstChild("HumanoidRootPart"))
+	if not char or not hrp or not troot then return false end
+	local pos = troot.Position - troot.CFrame.LookVector * BF_BACK
+	local dest = Vector3.new(pos.X, troot.Position.Y, pos.Z)
+	char:PivotTo(CFrame.new(dest) * hrp.CFrame.Rotation)
+	return true
+end
+
+local function teleportOnce()
+	local target = nearestTarget(cfg.bfRange)
+	if not target then return false end
+	teleportBehind(target)
+	faceTarget(target)
+	return true
+end
+
+local function fireChainEffect(target)
+	if not cfg.chainEffect then return end
+	if not EffectsRemote then return end
+	local char = player.Character
+	if not char or not target then return end
+	pcall(function()
+		if firesignal then
+			firesignal(EffectsRemote.OnClientEvent, "BlackFlashChain", char, target)
+		else
+			for _, conn in ipairs(getconnections(EffectsRemote.OnClientEvent)) do
+				conn:Fire("BlackFlashChain", char, target)
+			end
+		end
+	end)
+end
+
+local function setBlock(state)
+	if blocking == state then return end
+	if state then
+		if not BlockActivated then return end
+		BlockActivated:FireServer(nil)
+		blocking = true
+	else
+		if not BlockDeactivated then return end
+		BlockDeactivated:FireServer()
+		blocking = false
+	end
+end
+
+local animHook = {}
+local animCache = {}
+local modelWatch = {}
+
+local pickRemote
+
+local function isAttackAnim(anim)
+	if not anim then return false end
+	local key = anim.AnimationId .. "|" .. anim.Name
+	local cached = animCache[key]
+	if cached == nil then
+		cached = (anim.AnimationId ~= "" and not isLoco(anim.Name))
+		animCache[key] = cached
+	end
+	return cached
+end
+
+local function distToModel(model)
+	local hrp = selfRoot()
+	local root = model and (model.PrimaryPart or model:FindFirstChild("HumanoidRootPart"))
+	if not hrp or not root then return math.huge end
+	return (root.Position - hrp.Position).Magnitude
+end
+
+local function onAttackHeard(model)
+	if not cfg.autoBlock then return end
+	if distToModel(model) > cfg.blockRange then return end
+	lastThreat = os.clock()
+	setBlock(true)
+end
+
+local function bindAnimator(model, animator)
+	if animHook[model] then return true end
+	animHook[model] = {
+		conn = animator.AnimationPlayed:Connect(function(track)
+			if isAttackAnim(track.Animation) then
+				onAttackHeard(model)
+			end
+		end)
+	}
+	return true
+end
+
+local function hookAnimator(model)
+	if animHook[model] then return true end
+	local animator = model:FindFirstChild("Animator", true)
+	if not animator then return false end
+	return bindAnimator(model, animator)
+end
+
+local function stopWatch(model)
+	if modelWatch[model] then
+		modelWatch[model]:Disconnect()
+		modelWatch[model] = nil
+	end
+end
+
+local function watchModel(model)
+	if model == player.Character then return end
+	if hookAnimator(model) then return end
+	if modelWatch[model] then return end
+	modelWatch[model] = model.DescendantAdded:Connect(function(d)
+		if d:IsA("Animator") and not animHook[model] then
+			if bindAnimator(model, d) then
+				stopWatch(model)
+			end
+		end
+	end)
+end
+
+local function scanAnimators()
+	local char = player.Character
+	local container = workspace:FindFirstChild("Characters") or workspace
+	for _, v in ipairs(container:GetChildren()) do
+		if v:IsA("Model") and v ~= char then
+			watchModel(v)
+		end
+	end
+	for model, data in pairs(animHook) do
+		if not model.Parent or model == char then
+			if data.conn then data.conn:Disconnect() end
+			animHook[model] = nil
+			stopWatch(model)
+		end
+	end
+	for model in pairs(modelWatch) do
+		if not model.Parent or model == char then
+			stopWatch(model)
+		end
+	end
+end
+
+task.spawn(function()
+	local container = workspace:FindFirstChild("Characters") or workspace
+	container.ChildAdded:Connect(function(v)
+		if v:IsA("Model") then
+			task.spawn(watchModel, v)
+		end
+	end)
+	for _, v in ipairs(container:GetChildren()) do
+		if v:IsA("Model") then
+			task.spawn(watchModel, v)
+		end
+	end
+end)
+
+task.spawn(function()
+	while true do
+		task.wait(BLOCK_POLL)
+		if not cfg.autoBlock then
+			if blocking then
+				setBlock(false)
+			end
+		else
+			scanAnimators()
+			if not blocking and os.clock() - lastDamage < 0.5 then
+				setBlock(true)
+				lastThreat = os.clock()
+			end
+			if blocking and os.clock() - lastThreat > BLOCK_GRACE then
+				setBlock(false)
+			end
+		end
+	end
+end)
+
+local faceConn = nil
+local lastFace = 0
+
+local function stopAutoFace()
+	if faceConn then
+		faceConn:Disconnect()
+		faceConn = nil
+	end
+end
+
+local function startAutoFace()
+	stopAutoFace()
+	faceConn = RunService.Heartbeat:Connect(function()
+		if not cfg.faceTarget then
+			stopAutoFace()
+			return
+		end
+		if os.clock() - lastFace < 0.08 then return end
+		lastFace = os.clock()
+		local target = nearestTarget(200)
+		if target then
+			faceTarget(target)
+		end
+	end)
+end
+
+local promptConn = nil
+
+local function applyFastInteract(state)
+	if promptConn then
+		promptConn:Disconnect()
+		promptConn = nil
+	end
+	if not state then return end
+	promptConn = ProximityPromptService.PromptButtonHoldBegan:Connect(function(prompt)
+		if prompt and prompt:IsA("ProximityPrompt") then
+			pcall(function()
+				fireproximityprompt(prompt)
+			end)
+		end
+	end)
+end
+
+local function applyHumanoid(hum)
+	if not hum then return end
+	hum.UseJumpPower = true
+	hum.JumpPower = cfg.jumpPower
+	hum.WalkSpeed = cfg.walkSpeed
+end
+
+local function watchChar(char)
+	local hum = char:WaitForChild("Humanoid", 10)
+	if not hum then return end
+	applyHumanoid(hum)
+	hum.HealthChanged:Connect(function(health)
+		if health < hum.MaxHealth then
+			lastDamage = os.clock()
+		end
+	end)
+	hum.StateChanged:Connect(function(_, new)
+		if cfg.infJump and (new == Enum.HumanoidStateType.Freefall or new == Enum.HumanoidStateType.FallingDown) then
+			hum:ChangeState(Enum.HumanoidStateType.Jumping)
+		end
+	end)
+end
+
+if player.Character then
+	task.spawn(watchChar, player.Character)
+end
+player.CharacterAdded:Connect(function(char)
+	task.spawn(watchChar, char)
+	if cfg.faceTarget then
+		task.wait(1)
+		startAutoFace()
+	end
+end)
+
+local function resolveArg()
+	if lastTarget and lastTarget.Parent then
+		return lastTarget
+	end
+	return nearestTarget(cfg.bfRange)
+end
+
+pickRemote = function()
+	if cfg.character ~= "auto" then
+		return remoteList[cfg.character]
+	end
+	if activeRemote then
+		return activeRemote
+	end
+	for _, name in ipairs(SERVICES) do
+		if remoteList[name] then
+			return remoteList[name]
+		end
+	end
+	return nil
+end
+
+local function fireFinishers()
+	if os.clock() - lastFire < COOLDOWN then return end
+	local remote = pickRemote()
+	if not remote then return end
+	lastFire = os.clock()
+	firing = true
+	for _, name in ipairs(cfg.finishers) do
+		local action = FINISH_MAP[name]
+		if action then
+			remote:FireServer(action, resolveArg())
+			task.wait(FINISH_GAP)
+		end
+	end
+	firing = false
+end
+
+local function fireSkill(remote, args)
+	pcall(function()
+		remote:FireServer(table.unpack(args, 1, args.n))
+	end)
+end
+
+local function blackFlashSequence(remote, args)
+	local target = nearestTarget(cfg.bfRange)
+	for i = 1, cfg.bfHits do
+		teleportOnce()
+		task.wait(BF_SETTLE)
+		local who = nearestTarget(cfg.bfRange) or target
+		if who then faceTarget(who) end
+		fireSkill(remote, args)
+		if i < cfg.bfHits then
+			task.wait(BF_INTERVAL)
+		end
+	end
+
+	local who = nearestTarget(cfg.bfRange) or target
+	if who then faceTarget(who) end
+	pcall(fireChainEffect, who)
+end
+
+local oldNamecall
+oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+	local method = getnamecallmethod()
+	local args = table.pack(...)
+
+	if method ~= "FireServer" then
+		return oldNamecall(self, table.unpack(args, 1, args.n))
+	end
+
+	local isDiv = false
+	pcall(function()
+		isDiv = isDivergentRemote(self)
+	end)
+
+	if isDiv then
+		if cfg.blackFlash then
+			if bfBusy then
+				return oldNamecall(self, table.unpack(args, 1, args.n))
+			end
+			bfBusy = true
+			task.spawn(function()
+				pcall(blackFlashSequence, self, args)
+				bfBusy = false
+			end)
+			return
+		end
+		return oldNamecall(self, table.unpack(args, 1, args.n))
+	end
+
+	if remotes[self] and cfg.enabled and not firing then
+		pcall(function()
+			activeRemote = self
+			for i = args.n, 1, -1 do
+				local v = args[i]
+				if typeof(v) == "Instance" and v:IsA("Model") and v ~= player.Character then
+					lastTarget = v
+					break
+				end
+			end
+			seq = seq + 1
+			local my = seq
+			task.delay(COMBO_GAP, function()
+				if my ~= seq or not cfg.enabled or firing then return end
+				task.spawn(fireFinishers)
+			end)
+		end)
+	end
+
+	return oldNamecall(self, table.unpack(args, 1, args.n))
+end)
+
+local PlayerGui = player:WaitForChild("PlayerGui")
+local hotkeyGui
+
+local function createHotkey()
+	local old = PlayerGui:FindFirstChild("QuickKey")
+	if old then old:Destroy() end
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "QuickKey"
+	gui.ResetOnSpawn = false
+	gui.DisplayOrder = 50
+	gui.Parent = PlayerGui
+	hotkeyGui = gui
+
+	local btn = Instance.new("TextButton")
+	btn.Name = "Key"
+	btn.Size = UDim2.fromOffset(44, 44)
+	btn.Position = UDim2.new(1, -64, 0.5, -22)
+	btn.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+	btn.Text = "关"
+	btn.TextSize = 16
+	btn.Font = Enum.Font.GothamBold
+	btn.TextColor3 = Color3.fromRGB(200, 200, 200)
+	btn.BorderSizePixel = 0
+	btn.Draggable = true
+	btn.AutoButtonColor = false
+	btn.Parent = gui
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(1, 0)
+	corner.Parent = btn
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Thickness = 2
+	stroke.Color = Color3.fromRGB(0, 120, 220)
+	stroke.Parent = btn
+
+	local lock = Instance.new("TextButton")
+	lock.Size = UDim2.fromOffset(16, 16)
+	lock.Position = UDim2.new(1, -18, 0, 3)
+	lock.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+	lock.Text = "锁"
+	lock.TextSize = 9
+	lock.Font = Enum.Font.Gotham
+	lock.TextColor3 = Color3.fromRGB(200, 200, 200)
+	lock.BorderSizePixel = 0
+	lock.AutoButtonColor = false
+	lock.Parent = btn
+
+	local lockCorner = Instance.new("UICorner")
+	lockCorner.CornerRadius = UDim.new(1, 0)
+	lockCorner.Parent = lock
+
+	local function refresh()
+		local on = cfg.autoClap
+		btn.Text = on and "开" or "关"
+		btn.TextColor3 = on and Color3.fromRGB(120, 255, 150) or Color3.fromRGB(200, 200, 200)
+		btn.BackgroundColor3 = on and Color3.fromRGB(18, 84, 44) or Color3.fromRGB(28, 28, 34)
+		stroke.Color = on and Color3.fromRGB(40, 220, 110) or Color3.fromRGB(0, 120, 220)
+	end
+
+	btn.MouseButton1Click:Connect(function()
+		cfg.autoClap = not cfg.autoClap
+		clapTarget = nil
+		refresh()
+		WindUI:Notify({
+			Title = "快捷拍手",
+			Content = cfg.autoClap and "自动拍手已开启" or "自动拍手已关闭",
+			Duration = 1.5
+		})
+	end)
+
+	local close = Instance.new("TextButton")
+	close.Size = UDim2.fromOffset(16, 16)
+	close.Position = UDim2.new(0, 2, 0, 3)
+	close.BackgroundColor3 = Color3.fromRGB(70, 45, 45)
+	close.Text = "×"
+	close.TextSize = 11
+	close.Font = Enum.Font.GothamBold
+	close.TextColor3 = Color3.fromRGB(230, 180, 180)
+	close.BorderSizePixel = 0
+	close.AutoButtonColor = false
+	close.Parent = btn
+
+	local closeCorner = Instance.new("UICorner")
+	closeCorner.CornerRadius = UDim.new(1, 0)
+	closeCorner.Parent = close
+
+	close.MouseButton1Click:Connect(function()
+		gui.Enabled = false
+		WindUI:Notify({Title = "悬浮按钮", Content = "已隐藏，可在面板里重新打开", Duration = 2})
+	end)
+
+	lock.MouseButton1Click:Connect(function()
+		btn.Draggable = not btn.Draggable
+		lock.Text = btn.Draggable and "锁" or "定"
+		lock.TextColor3 = btn.Draggable and Color3.fromRGB(200, 200, 200) or Color3.fromRGB(120, 255, 150)
+	end)
+
+	refresh()
+end
+
+createHotkey()
+
+local Window = WindUI:CreateWindow({
+	Title = "JJS",
+	Icon = "palette",
+	Author = "上面大名称下面",
+	Folder = "JJS",
+	Size = UDim2.fromOffset(700, 500),
+	Theme = "Dark",
+	User = {
+		Enabled = true,
+		Callback = function()
+			WindUI:Notify({Title = "配置触发", Content = "用户配置回调已执行", Duration = 1.5})
+		end
+	},
+	SideBarWidth = 220,
+	ScrollBarEnabled = true
+})
+
+local TabFinish = Window:Tab({
+	Title = "连招收尾",
+	Icon = "swords",
+	Locked = false,
+})
+
+TabFinish:Toggle({
+	Title = "连招收尾",
+	Desc = "连招打完自动放下和上",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		cfg.enabled = state
+		seq = seq + 1
+		WindUI:Notify({
+			Title = "连招收尾",
+			Content = state and "已启用" or "已禁用",
+			Icon = state and "check" or "x",
+			Duration = 2
+		})
+	end
+})
+
+TabFinish:Dropdown({
+	Title = "角色",
+	Values = { "自动", "Ryu", "Todo", "Choso", "Mahito", "Megumi", "Hakari", "Gojo", "Yuta", "Itadori" },
+	Value = "自动",
+	Callback = function(option)
+		if option == "自动" then
+			cfg.character = "auto"
+		else
+			cfg.character = option .. "Service"
+		end
+	end
+})
+
+TabFinish:Dropdown({
+	Title = "收尾招式",
+	Values = { "下 + 上", "仅上", "仅下" },
+	Value = "下 + 上",
+	Callback = function(option)
+		if option == "仅下" then
+			cfg.finishers = { "下" }
+		elseif option == "仅上" then
+			cfg.finishers = { "上" }
+		else
+			cfg.finishers = { "下", "上" }
+		end
+	end
+})
+
+local TabBlock = Window:Tab({
+	Title = "自动格挡",
+	Icon = "shield",
+	Locked = false,
+})
+
+TabBlock:Slider({
+	Title = "格挡范围",
+	Step = 1,
+	Value = { Min = 3, Max = 20, Default = 5 },
+	Callback = function(value)
+		cfg.blockRange = value
+	end
+})
+
+TabBlock:Toggle({
+	Title = "受击自动格挡",
+	Desc = "格挡范围内有人出招动画就立刻举盾，0.8 秒无动作解除",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		if state and not BlockActivated then
+			WindUI:Notify({Title = "不可用", Content = "没找到 BlockService", Duration = 2})
+			return
+		end
+		cfg.autoBlock = state
+		lastThreat = 0
+		if not state then
+			setBlock(false)
+		end
+	end
+})
+
+local TabUtil = Window:Tab({
+	Title = "通用功能",
+	Icon = "settings",
+	Locked = false,
+})
+
+TabUtil:Slider({
+	Title = "移动速度",
+	Step = 1,
+	Value = { Min = 16, Max = 200, Default = 16 },
+	Callback = function(value)
+		cfg.walkSpeed = value
+		local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum.WalkSpeed = value
+		end
+	end
+})
+
+TabUtil:Slider({
+	Title = "跳跃高度",
+	Step = 1,
+	Value = { Min = 50, Max = 600, Default = 50 },
+	Callback = function(value)
+		cfg.jumpPower = value
+		local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+		if hum then
+			applyHumanoid(hum)
+		end
+	end
+})
+
+TabUtil:Toggle({
+	Title = "无限跳",
+	Desc = "下落中自动再跳一次，配合跳跃高度使用",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		cfg.infJump = state
+	end
+})
+
+TabUtil:Button({
+	Title = "开启飞行",
+	Icon = "wind",
+	Callback = function()
+		local okFly, err = pcall(function()
+			loadstring(game:HttpGet("https://raw.githubusercontent.com/kongbaNB/9178/refs/heads/main/fly.lua"))()
+		end)
+		WindUI:Notify({
+			Title = okFly and "飞行已加载" or "飞行加载失败",
+			Content = okFly and "脚本已执行" or tostring(err),
+			Duration = 2
+		})
+	end
+})
+
+TabUtil:Toggle({
+	Title = "自动朝向最近目标",
+	Desc = "每 0.08 秒水平朝向 200 米内最近的人，重生自动继续",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		cfg.faceTarget = state
+		if state then
+			startAutoFace()
+		else
+			stopAutoFace()
+		end
+	end
+})
+
+TabUtil:Toggle({
+	Title = "快速互动",
+	Desc = "按住交互键瞬间完成 ProximityPrompt，跳过读条",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		cfg.fastInteract = state
+		applyFastInteract(state)
+	end
+})
+
+local function getClapTarget()
+	local now = os.clock()
+	if clapTarget and clapTarget.Parent and (now - clapTargetAt) < 0.6 then
+		local hum = clapTarget:FindFirstChildOfClass("Humanoid")
+		if hum and hum.Health > 0 then
+			return clapTarget
+		end
+	end
+	clapTarget = nearestTarget(cfg.todoRange)
+	clapTargetAt = now
+	return clapTarget
+end
+
+local function clapAt(remote, target, left)
+	if not remote or not target then return false end
+	pcall(function()
+		if left then
+			remote:FireServer(false, target)
+		else
+			remote:FireServer(target)
+		end
+	end)
+	return true
+end
+
+local function todoClap(left)
+	local remote = left and TodoClap or TodoSwap
+	if not remote then
+		WindUI:Notify({Title = "不可用", Content = "没找到 TodoService", Duration = 2})
+		return false
+	end
+	local target = getClapTarget()
+	if not target then
+		WindUI:Notify({Title = "拍手失败", Content = "范围内没有目标", Duration = 2})
+		return false
+	end
+	return clapAt(remote, target, left)
+end
+
+local TabBF = Window:Tab({
+	Title = "瞬移黑闪",
+	Icon = "flame",
+	Locked = false,
+})
+
+TabBF:Toggle({
+	Title = "自动黑闪链",
+	Desc = "按分歧之拳：自动连用两次，第二次间隔 0.3 秒",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		cfg.blackFlash = state
+		bfBusy = false
+	end
+})
+
+TabBF:Toggle({
+	Title = "黑闪链特效",
+	Desc = "本地触发 BlackFlashChain 视觉链",
+	Type = "Checkbox",
+	Default = true,
+	Callback = function(state)
+		cfg.chainEffect = state
+	end
+})
+
+TabBF:Slider({
+	Title = "瞬移范围",
+	Step = 1,
+	Value = { Min = 5, Max = 60, Default = 20 },
+	Callback = function(value)
+		cfg.bfRange = value
+	end
+})
+
+TabBF:Slider({
+	Title = "命中次数",
+	Step = 1,
+	Value = { Min = 1, Max = 4, Default = 2 },
+	Callback = function(value)
+		cfg.bfHits = value
+	end
+})
+
+TabBF:Button({
+	Title = "手动贴一次",
+	Icon = "play",
+	Callback = function()
+		local ok2 = teleportOnce()
+		WindUI:Notify({
+			Title = ok2 and "已贴到背后" or "失败",
+			Content = ok2 and "瞬移完成" or "范围内没有目标",
+			Duration = 2
+		})
+	end
+})
+
+task.spawn(function()
+	while true do
+		task.wait(0.03)
+		if cfg.autoClap then
+			local rightTarget = getClapTarget()
+			if rightTarget then
+				clapAt(TodoSwap, rightTarget, false)
+			end
+			task.wait(cfg.clapLeftSpeed)
+			for i = 1, cfg.clapLeftTimes do
+				local leftTarget = getClapTarget()
+				if leftTarget then
+					clapAt(TodoClap, leftTarget, true)
+				end
+				if i < cfg.clapLeftTimes then
+					task.wait(cfg.clapLeftGap)
+				end
+			end
+			task.wait(cfg.clapSpeed)
+		end
+	end
+end)
+
+local TabTodo = Window:Tab({
+	Title = "东塘的拍手",
+	Icon = "hand",
+	Locked = false,
+})
+
+TabTodo:Toggle({
+	Title = "显示悬浮按钮",
+	Desc = "显示或关闭右侧圆形快捷按钮",
+	Type = "Checkbox",
+	Default = true,
+	Callback = function(state)
+		if hotkeyGui then
+			hotkeyGui.Enabled = state
+		end
+	end
+})
+
+TabTodo:Slider({
+	Title = "拍手范围",
+	Step = 1,
+	Value = { Min = 5, Max = 60, Default = 25 },
+	Callback = function(value)
+		cfg.todoRange = value
+		clapTarget = nil
+	end
+})
+
+TabTodo:Toggle({
+	Title = "自动拍手",
+	Desc = "持续先右后左，右拍后接左拍更快",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		cfg.autoClap = state
+		clapTarget = nil
+	end
+})
+
+TabTodo:Slider({
+	Title = "右拍速度",
+	Step = 0.01,
+	Value = { Min = 0.05, Max = 1, Default = 0.25 },
+	Callback = function(value)
+		cfg.clapSpeed = value
+	end
+})
+
+TabTodo:Slider({
+	Title = "左拍速度",
+	Step = 0.01,
+	Value = { Min = 0.05, Max = 1, Default = 0.45 },
+	Callback = function(value)
+		cfg.clapLeftSpeed = value
+	end
+})
+
+TabTodo:Slider({
+	Title = "左拍间隔",
+	Step = 0.01,
+	Value = { Min = 0.05, Max = 1, Default = 0.15 },
+	Callback = function(value)
+		cfg.clapLeftGap = value
+	end
+})
+
+TabTodo:Slider({
+	Title = "左拍次数",
+	Step = 1,
+	Value = { Min = 1, Max = 3, Default = 2 },
+	Callback = function(value)
+		cfg.clapLeftTimes = value
+	end
+})
+
+TabTodo:Button({
+	Title = "左拍手",
+	Icon = "repeat",
+	Callback = function()
+		if todoClap(true) then
+			WindUI:Notify({Title = "左拍手", Content = "已交换位置", Duration = 2})
+		end
+	end
+})
+
+TabTodo:Button({
+	Title = "右拍手",
+	Icon = "repeat",
+	Callback = function()
+		if todoClap(false) then
+			WindUI:Notify({Title = "右拍手", Content = "已交换位置", Duration = 2})
+		end
+	end
+})
+
+TabTodo:Button({
+	Title = "连续拍手两次",
+	Icon = "play",
+	Callback = function()
+		if todoClap(false) then
+			task.wait(cfg.clapLeftSpeed)
+			for i = 1, cfg.clapLeftTimes do
+				todoClap(true)
+				if i < cfg.clapLeftTimes then
+					task.wait(cfg.clapLeftGap)
+				end
+			end
+			WindUI:Notify({Title = "拍手", Content = "右拍 + 左拍已完成", Duration = 2})
+		end
+	end
+})
+
+local candyEnabled = false
+local candyThread = nil
+local candyInterval = 0.5
+local candyColor = Color3.fromRGB(255, 120, 200)
+local candyShowName = true
+local candyShowDist = true
+local candyFillTransparency = 0.55
+
+local CANDY_PRESETS = {
+	["糖果粉"] = Color3.fromRGB(255, 120, 200),
+	["薄荷绿"] = Color3.fromRGB(110, 230, 170),
+	["冰蓝"] = Color3.fromRGB(120, 200, 255),
+	["柠檬黄"] = Color3.fromRGB(255, 224, 120),
+}
+
+local function isCandyName(name)
+	return string.find(string.lower(name), "halloweendoor") ~= nil
+end
+
+local function candyDistance(part)
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then return 0 end
+	return math.floor((root.Position - part.Position).Magnitude)
+end
+
+local function clearCandy()
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst.Name == "IdkCandyHL" or inst.Name == "IdkCandyBB" then
+			pcall(function() inst:Destroy() end)
+		end
+	end
+end
+
+local function applyCandy(inst)
+	if not inst:IsA("BasePart") then return end
+
+	local hl = inst:FindFirstChild("IdkCandyHL")
+	if not hl then
+		hl = Instance.new("Highlight")
+		hl.Name = "IdkCandyHL"
+		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		hl.Adornee = inst
+		hl.Parent = inst
+	end
+	hl.FillColor = candyColor
+	hl.FillTransparency = candyFillTransparency
+	hl.OutlineColor = candyColor
+	hl.OutlineTransparency = 0
+
+	local bb = inst:FindFirstChild("IdkCandyBB")
+	if not bb then
+		bb = Instance.new("BillboardGui")
+		bb.Name = "IdkCandyBB"
+		bb.Size = UDim2.fromOffset(240, 44)
+		bb.StudsOffset = Vector3.new(0, 3, 0)
+		bb.AlwaysOnTop = true
+		bb.Adornee = inst
+		bb.Parent = inst
+
+		local label = Instance.new("TextLabel")
+		label.Name = "CandyText"
+		label.Size = UDim2.fromScale(1, 1)
+		label.BackgroundTransparency = 1
+		label.Font = Enum.Font.Arcade
+		label.TextSize = 20
+		label.TextColor3 = candyColor
+		label.TextStrokeTransparency = 0
+		label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+		label.Parent = bb
+	end
+
+	local label = bb:FindFirstChild("CandyText")
+	if label then
+		label.TextColor3 = candyColor
+		local parts = {}
+		if candyShowName then
+			parts[#parts + 1] = "糖果门"
+		end
+		if candyShowDist then
+			parts[#parts + 1] = "[ " .. tostring(candyDistance(inst)) .. " 格 ]"
+		end
+		label.Text = table.concat(parts, "  ")
+	end
+end
+
+local function scanCandy()
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst:IsA("BasePart") and isCandyName(inst.Name) then
+			applyCandy(inst)
+		end
+	end
+end
+
+local function refreshCandyStyle()
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst.Name == "IdkCandyHL" and inst:IsA("Highlight") then
+			inst.FillColor = candyColor
+			inst.FillTransparency = candyFillTransparency
+			inst.OutlineColor = candyColor
+		elseif inst.Name == "IdkCandyBB" and inst:IsA("BillboardGui") then
+			local label = inst:FindFirstChild("CandyText")
+			if label then
+				label.TextColor3 = candyColor
+			end
+		end
+	end
+end
+
+local function stopCandy()
+	candyEnabled = false
+	if candyThread then
+		task.cancel(candyThread)
+		candyThread = nil
+	end
+end
+
+local function startCandy()
+	stopCandy()
+	candyEnabled = true
+	candyThread = task.spawn(function()
+		while candyEnabled do
+			pcall(scanCandy)
+			task.wait(candyInterval)
+		end
+		candyThread = nil
+	end)
+end
+
+local TabCandy = Window:Tab({
+	Title = "糖果透视",
+	Icon = "eye",
+	Locked = false,
+})
+
+TabCandy:Toggle({
+	Title = "自动糖果透视",
+	Desc = "遍历 workspace 中名字含 halloweendoor 的对象",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		if state then
+			startCandy()
+			WindUI:Notify({ Title = "糖果透视", Content = "已开启", Icon = "check", Duration = 2 })
+		else
+			stopCandy()
+			WindUI:Notify({ Title = "糖果透视", Content = "已关闭", Icon = "x", Duration = 2 })
+		end
+	end
+})
+
+TabCandy:Slider({
+	Title = "刷新间隔(秒)",
+	Step = 0.1,
+	Value = { Min = 0.1, Max = 3, Default = 0.5 },
+	Callback = function(v)
+		candyInterval = v
+	end
+})
+
+TabCandy:Slider({
+	Title = "填充透明度",
+	Step = 0.01,
+	Value = { Min = 0, Max = 1, Default = 0.55 },
+	Callback = function(v)
+		candyFillTransparency = v
+		refreshCandyStyle()
+	end
+})
+
+TabCandy:Dropdown({
+	Title = "颜色预设",
+	Values = { "糖果粉", "薄荷绿", "冰蓝", "柠檬黄" },
+	Value = "糖果粉",
+	Callback = function(v)
+		candyColor = CANDY_PRESETS[v] or Color3.fromRGB(255, 120, 200)
+		refreshCandyStyle()
+	end
+})
+
+TabCandy:Slider({
+	Title = "红色(0-255)",
+	Step = 1,
+	Value = { Min = 0, Max = 255, Default = 255 },
+	Callback = function(v)
+		candyColor = Color3.fromRGB(math.floor(v), math.floor(candyColor.G * 255), math.floor(candyColor.B * 255))
+		refreshCandyStyle()
+	end
+})
+
+TabCandy:Slider({
+	Title = "绿色(0-255)",
+	Step = 1,
+	Value = { Min = 0, Max = 255, Default = 120 },
+	Callback = function(v)
+		candyColor = Color3.fromRGB(math.floor(candyColor.R * 255), math.floor(v), math.floor(candyColor.B * 255))
+		refreshCandyStyle()
+	end
+})
+
+TabCandy:Slider({
+	Title = "蓝色(0-255)",
+	Step = 1,
+	Value = { Min = 0, Max = 255, Default = 200 },
+	Callback = function(v)
+		candyColor = Color3.fromRGB(math.floor(candyColor.R * 255), math.floor(candyColor.G * 255), math.floor(v))
+		refreshCandyStyle()
+	end
+})
+
+TabCandy:Toggle({
+	Title = "显示名字",
+	Type = "Checkbox",
+	Default = true,
+	Callback = function(state)
+		candyShowName = state
+		scanCandy()
+	end
+})
+
+TabCandy:Toggle({
+	Title = "显示距离",
+	Type = "Checkbox",
+	Default = true,
+	Callback = function(state)
+		candyShowDist = state
+		scanCandy()
+	end
+})
+
+TabCandy:Button({
+	Title = "立即扫描",
+	Icon = "search",
+	Callback = function()
+		scanCandy()
+		WindUI:Notify({ Title = "糖果透视", Content = "扫描完成", Duration = 2 })
+	end
+})
+
+TabCandy:Button({
+	Title = "清除全部标记",
+	Icon = "trash",
+	Callback = function()
+		clearCandy()
+		WindUI:Notify({ Title = "糖果透视", Content = "已清除标记", Duration = 2 })
+	end
+})
+
+TabCandy:Button({
+	Title = "列出扫到的对象",
+	Icon = "list",
+	Callback = function()
+		local list = {}
+		for _, inst in ipairs(workspace:GetDescendants()) do
+			if inst:IsA("BasePart") and isCandyName(inst.Name) then
+				list[#list + 1] = string.format("%s  距离=%d", inst:GetFullName(), candyDistance(inst))
+			end
+		end
+		if #list == 0 then
+			WindUI:Notify({ Title = "糖果透视", Content = "当前没有扫到对象", Duration = 3 })
+		else
+			print(table.concat(list, "\n"))
+			WindUI:Notify({ Title = "糖果透视", Content = string.format("共 %d 个，已输出控制台", #list), Duration = 3 })
+		end
+	end
+})
+
+task.spawn(function()
+	while true do
+		task.wait(0.15)
+		local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+		if hum then
+			applyHumanoid(hum)
+		end
+	end
+end)
