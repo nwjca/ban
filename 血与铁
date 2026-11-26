@@ -1,0 +1,1367 @@
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+
+WindUI.TransparencyValue = 0.2
+WindUI:SetTheme("Dark")
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local LP = Players.LocalPlayer
+
+local Requests = RS:WaitForChild("Requests", 15)
+local SR = RS:WaitForChild("SelectiveReplication", 15)
+local ReplicateAnimation = SR and SR:FindFirstChild("ReplicateAnimation")
+local RequestDamage = Requests and Requests:FindFirstChild("RequestDamage")
+local VoteEvent = Requests and Requests:FindFirstChild("RequestVoteKick")
+local GC = workspace:WaitForChild("GarbageCollection", 15)
+
+local mouse = LP:GetMouse()
+
+local opts = {
+	Mode      = "最近的一个",
+	Tool      = "Hammer",
+	AutoTool  = true,
+	AltSwitch = true,
+	Interval  = 0.4,
+	MaxDist   = 8,
+	Animate   = true,
+	DoorAuto  = false,
+	DoorDist  = 45,
+	DoorCd    = 1.2,
+	DoorScan  = 0.35,
+	PoseOn    = false,
+	Pitch     = 0,
+	BallShow  = true,
+	DoorBall  = true,
+	BallSize  = 52,
+	BallLock  = false,
+	AimOn     = false,
+	AimFov    = 130,
+	AimTeam   = true,
+	AimWall   = false,
+	AimCircle = true,
+	AimThick  = 1.5,
+	TPForce   = false,
+	TPDist    = 7,
+	VoteTarget = nil,
+	VoteMode  = "玩家名字",
+	VoteDelay = 2,
+	VoteBurst = 2,
+	VoteThreads = 4,
+	AutoList  = true,
+	ListDelay = 5,
+}
+
+local running = false
+local swingIndex = 0
+local doorRunning = false
+local doorLast = {}
+local doorGroup = nil
+local doorRemoteCache = nil
+local poseCache = {char = nil, neck = nil, n0 = nil, base = nil}
+local neckConn = nil
+local applying = false
+local POSE_RENDER = "AutoPoseLock"
+local TP_RENDER = "ForceThirdPerson"
+local aimTarget = nil
+local origZoom = nil
+local voteRunning = false
+local voteLast = {res = "", ok = false, count = 0}
+
+local R6_NECK_BASE = CFrame.Angles(-math.pi / 2, 0, math.pi)
+
+local function getChar()
+	local char = LP.Character or LP.CharacterAdded:Wait()
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if hum and hum.Health <= 0 then return nil end
+	return char
+end
+
+local function getHRP()
+	local char = getChar()
+	if not char then return nil end
+	return char:FindFirstChild("HumanoidRootPart")
+end
+
+local function getList()
+	local t = {}
+	if not GC then return t end
+	for _, obj in ipairs(GC:GetChildren()) do
+		local c = obj:FindFirstChild("ConstructCentre")
+		if c and c:IsA("BasePart") then
+			t[#t + 1] = {Name = obj.Name, Centre = c, Model = obj}
+		end
+	end
+	return t
+end
+
+local function nearest(filterName, maxDist)
+	local hrp = getHRP()
+	if not hrp then return nil, math.huge end
+	local best, bestD = nil, math.huge
+	for _, item in ipairs(getList()) do
+		if filterName == "最近的一个" or item.Name == filterName then
+			local d = (item.Centre.Position - hrp.Position).Magnitude
+			if (maxDist == 0 or d <= maxDist) and d < bestD then
+				best, bestD = item, d
+			end
+		end
+	end
+	return best, bestD
+end
+
+local function otherTool(name)
+	if name == "Hammer" then return "Shovel" end
+	if name == "Shovel" then return "Hammer" end
+	return "Hammer"
+end
+
+local function resolveTool(structName, index)
+	local primary = opts.Tool
+	if opts.AutoTool then
+		if string.find(structName, "Barricade") or string.find(structName, "Wall") or string.find(structName, "Crate") then
+			primary = "Hammer"
+		elseif string.find(structName, "Earthwork") or string.find(structName, "Trench") or string.find(structName, "Dirt") then
+			primary = "Shovel"
+		end
+	end
+	if not opts.AltSwitch then return primary end
+	if index % 2 == 0 then return primary end
+	return otherTool(primary)
+end
+
+local function forceEquip(name)
+	local char = getChar()
+	if not char then return nil end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum then return nil end
+
+	hum:UnequipTools()
+	task.wait(0.12)
+
+	char = LP.Character
+	if not char then return nil end
+	local bp = LP:FindFirstChild("Backpack")
+	if not bp then return nil end
+	local tool = bp:FindFirstChild(name)
+	if not tool then
+		local held = char:FindFirstChild(name)
+		if held then return held end
+		warn("背包里没有 " .. name)
+		return nil
+	end
+
+	hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum then return nil end
+	hum:EquipTool(tool)
+
+	for _ = 1, 8 do
+		local t = char:FindFirstChild(name)
+		if t then return t end
+		task.wait(0.04)
+	end
+	return char:FindFirstChild(name)
+end
+
+local function repairCycle(item)
+	if not item or not RequestDamage then return end
+	local hrp = getHRP()
+	if not hrp then return end
+	if (item.Centre.Position - hrp.Position).Magnitude > (opts.MaxDist == 0 and 999 or opts.MaxDist + 1) then return end
+
+	local toolName = resolveTool(item.Name, swingIndex)
+	local tool = forceEquip(toolName)
+	if not tool then return end
+
+	local centre = item.Centre
+
+	if opts.Animate and ReplicateAnimation then
+		ReplicateAnimation:FireServer("Tool", toolName, "IdleToSwing")
+		task.wait(0.1)
+		ReplicateAnimation:FireServer("Effect", toolName, "Construct")
+	end
+
+	RequestDamage:FireServer(centre, centre.Position, tool, "ConstructMelee", -1)
+
+	if opts.Animate and ReplicateAnimation then
+		task.wait(0.08)
+		ReplicateAnimation:FireServer("Tool", toolName, "SwingToIdle")
+	end
+
+	swingIndex = swingIndex + 1
+end
+
+local function startLoop()
+	if running then return end
+	running = true
+	task.spawn(function()
+		while running do
+			local t0 = os.clock()
+			local ok, err = pcall(function()
+				local item = nearest(opts.Mode, opts.MaxDist)
+				repairCycle(item)
+			end)
+			if not ok then
+				warn("循环异常：" .. tostring(err))
+				forceEquip(opts.Tool)
+				task.wait(0.5)
+			end
+			local rest = opts.Interval - (os.clock() - t0)
+			if rest > 0 then task.wait(rest) end
+		end
+	end)
+end
+
+local function stopLoop()
+	running = false
+end
+
+local function resolveGroup(force)
+	if not force and doorGroup and doorGroup.Parent then return doorGroup end
+	doorGroup = nil
+	doorRemoteCache = nil
+
+	local map = workspace:FindFirstChild("Map", true)
+	if map then
+		local d = map:FindFirstChild("Destructable", true)
+		if d then
+			doorGroup = d
+			return doorGroup
+		end
+	end
+
+	local d2 = workspace:FindFirstChild("Destructable", true)
+	if d2 then
+		doorGroup = d2
+		return doorGroup
+	end
+	return nil
+end
+
+local function collectRemotes(force)
+	if not force and doorRemoteCache then return doorRemoteCache end
+	local list = {}
+	local group = resolveGroup(force)
+	doorRemoteCache = list
+	if not group then return list end
+	for _, obj in ipairs(group:GetDescendants()) do
+		if obj.Name == "Interact" and (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") or obj:IsA("BindableEvent")) then
+			list[#list + 1] = {remote = obj, group = group}
+		end
+	end
+	return list
+end
+
+local function remotePos(remote, group)
+	local inst = remote
+	while inst and inst ~= group do
+		if inst:IsA("BasePart") then return inst.Position end
+		inst = inst.Parent
+	end
+	return nil
+end
+
+local function fireOne(remote)
+	if remote:IsA("RemoteEvent") then
+		remote:FireServer()
+	elseif remote:IsA("RemoteFunction") then
+		pcall(function() remote:InvokeServer() end)
+	elseif remote:IsA("BindableEvent") then
+		remote:Fire()
+	end
+end
+
+local function fireDoors()
+	local char = LP.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local now = os.clock()
+	local list = collectRemotes(false)
+	if #list == 0 then
+		list = collectRemotes(true)
+	end
+	for _, entry in ipairs(list) do
+		local remote = entry.remote
+		local pos = remotePos(remote, entry.group)
+		local near = true
+		if pos and hrp then
+			near = (pos - hrp.Position).Magnitude <= opts.DoorDist
+		end
+		if near and (now - (doorLast[remote] or 0) >= opts.DoorCd) then
+			doorLast[remote] = now
+			pcall(function() fireOne(remote) end)
+		end
+	end
+end
+
+local function doorStart()
+	if doorRunning then return end
+	doorRunning = true
+	task.spawn(function()
+		while doorRunning do
+			local ok, err = pcall(fireDoors)
+			if not ok then warn("开门异常：" .. tostring(err)) end
+			task.wait(opts.DoorScan)
+		end
+	end)
+end
+
+local function doorStop()
+	doorRunning = false
+end
+
+local function setDoor(state)
+	opts.DoorAuto = state
+	if state then doorStart() else doorStop() end
+end
+
+local function playerNames()
+	local t = {}
+	for _, pl in ipairs(Players:GetPlayers()) do
+		if pl ~= LP then
+			t[#t + 1] = pl.Name
+		end
+	end
+	return t
+end
+
+local function voteArg()
+	if not opts.VoteTarget then return nil end
+	local pl = Players:FindFirstChild(opts.VoteTarget)
+	if opts.VoteMode == "UserId" then
+		if pl then return pl.UserId end
+		return tonumber(opts.VoteTarget) or opts.VoteTarget
+	end
+	if pl then return pl.Name end
+	return opts.VoteTarget
+end
+
+local function voteOnce()
+	if not VoteEvent then
+		voteLast.res = "找不到 RequestVoteKick"
+		voteLast.ok = false
+		return false, voteLast.res
+	end
+	local arg = voteArg()
+	if not arg then
+		voteLast.res = "未选择投票目标"
+		voteLast.ok = false
+		return false, voteLast.res
+	end
+	local ok, res = pcall(function()
+		return VoteEvent:InvokeServer(arg)
+	end)
+	voteLast.count = voteLast.count + 1
+	if ok then
+		voteLast.ok = true
+		voteLast.res = tostring(res)
+		return true, res
+	end
+	voteLast.ok = false
+	voteLast.res = tostring(res)
+	return false, res
+end
+
+local function voteBurstOnce()
+	for _ = 1, math.max(1, math.floor(opts.VoteBurst)) do
+		voteOnce()
+		task.wait(0.01)
+	end
+end
+
+local function voteStart()
+	if voteRunning then return end
+	if not opts.VoteTarget then
+		WindUI:Notify({Title = "提示", Content = "还没选投票目标", Duration = 2.5})
+		return
+	end
+	voteRunning = true
+	voteOnce()
+	for _ = 1, math.max(1, math.floor(opts.VoteThreads)) do
+		task.spawn(function()
+			while voteRunning do
+				local ok, err = pcall(voteBurstOnce)
+				if not ok then warn("投票异常：" .. tostring(err)) end
+				task.wait(opts.VoteDelay)
+			end
+		end)
+	end
+end
+
+local function voteStop()
+	voteRunning = false
+end
+
+local function setVote(state)
+	if state then
+		voteStart()
+	else
+		voteStop()
+	end
+	opts.VoteAuto = state
+end
+
+local function poseHook()
+	local char = LP.Character
+	local neck = char and char:FindFirstChild("Neck", true)
+	if neck == poseCache.neck and neckConn then return end
+	if neckConn then
+		pcall(function() neckConn:Disconnect() end)
+		neckConn = nil
+	end
+	poseCache.char = char
+	poseCache.neck = neck
+	if not neck then return end
+	poseCache.n0 = neck.C0
+	poseCache.base = CFrame.new(0, 1, 0) * R6_NECK_BASE
+	neckConn = neck:GetPropertyChangedSignal("C0"):Connect(function()
+		if opts.PoseOn and not applying then
+			poseApply()
+		end
+	end)
+end
+
+local function poseApply()
+	if not opts.PoseOn or applying then return end
+	poseHook()
+	local neck = poseCache.neck
+	if not neck or not poseCache.base then return end
+	applying = true
+	neck.C0 = CFrame.Angles(math.rad(opts.Pitch), 0, 0) * poseCache.base
+	applying = false
+end
+
+local function poseRestore()
+	if poseCache.neck and poseCache.n0 then
+		applying = true
+		poseCache.neck.C0 = poseCache.n0
+		applying = false
+	end
+end
+
+RunService.Stepped:Connect(function()
+	if opts.PoseOn then
+		pcall(poseApply)
+	end
+end)
+
+local function poseBind()
+	pcall(function() RunService:UnbindFromRenderStep(POSE_RENDER) end)
+	RunService:BindToRenderStep(POSE_RENDER, 301, poseApply)
+end
+
+local function poseUnbind()
+	pcall(function() RunService:UnbindFromRenderStep(POSE_RENDER) end)
+end
+
+local function setPose(state)
+	opts.PoseOn = state
+	if state then
+		poseHook()
+		poseApply()
+		poseBind()
+	else
+		poseUnbind()
+		poseRestore()
+	end
+end
+
+local function tpLoop()
+	local cam = workspace.CurrentCamera
+	local char = LP.Character
+	local head = char and char:FindFirstChild("Head")
+	if not cam or not head then return end
+	local dist = (cam.CFrame.Position - head.Position).Magnitude
+	if dist >= opts.TPDist then return end
+	local look = cam.CFrame.LookVector
+	local pos = head.Position - look * opts.TPDist + Vector3.new(0, 1, 0)
+	cam.CFrame = CFrame.lookAt(pos, pos + look)
+end
+
+local function tpBind()
+	pcall(function() RunService:UnbindFromRenderStep(TP_RENDER) end)
+	RunService:BindToRenderStep(TP_RENDER, Enum.RenderPriority.Camera.Value + 1, tpLoop)
+end
+
+local function tpUnbind()
+	pcall(function() RunService:UnbindFromRenderStep(TP_RENDER) end)
+end
+
+local function setTP(state)
+	opts.TPForce = state
+	if state then
+		if not origZoom then
+			origZoom = {min = LP.CameraMinZoomDistance, max = LP.CameraMaxZoomDistance}
+		end
+		LP.CameraMinZoomDistance = math.max(0.5, math.min(opts.TPDist, LP.CameraMaxZoomDistance))
+		tpBind()
+		tpLoop()
+	else
+		tpUnbind()
+		if origZoom then
+			LP.CameraMinZoomDistance = origZoom.min
+			LP.CameraMaxZoomDistance = origZoom.max
+		end
+	end
+end
+
+local function validTarget(pl)
+	if pl == LP then return nil end
+	local char = pl.Character
+	if not char then return nil end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return nil end
+	local head = char:FindFirstChild("Head")
+	if not head then return nil end
+	if opts.AimTeam and LP.Team and pl.Team then
+		if pl.Team == LP.Team then return nil end
+	end
+	return head
+end
+
+local function hasLOS(cam, char, head)
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	rp.FilterDescendantsInstances = {LP.Character, cam}
+	local res = workspace:Raycast(cam.CFrame.Position, head.Position - cam.CFrame.Position, rp)
+	if not res then return true end
+	return res.Instance:IsDescendantOf(char)
+end
+
+local function pickAimTarget()
+	local cam = workspace.CurrentCamera
+	if not cam then return nil end
+	local vp = cam.ViewportSize
+	local center = Vector2.new(vp.X / 2, vp.Y / 2)
+	local best, bestD = nil, math.huge
+	for _, pl in ipairs(Players:GetPlayers()) do
+		local head = validTarget(pl)
+		if head then
+			local sp, onScreen = cam:WorldToViewportPoint(head.Position)
+			if onScreen and sp.Z > 0 then
+				local d = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+				if d <= opts.AimFov and d < bestD then
+					if opts.AimWall then
+						if hasLOS(cam, pl.Character, head) then
+							best, bestD = {char = pl.Character, head = head}, d
+						end
+					else
+						best, bestD = {char = pl.Character, head = head}, d
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
+local hookOk = pcall(function()
+	local oldIndex
+	oldIndex = hookmetamethod(game, "__index", function(t, k)
+		if aimTarget and t == mouse then
+			if k == "Hit" then
+				return CFrame.new(aimTarget.head.Position)
+			elseif k == "Target" then
+				return aimTarget.head
+			elseif k == "UnitRay" then
+				local cam = workspace.CurrentCamera
+				if cam then
+					return Ray.new(cam.CFrame.Position, (aimTarget.head.Position - cam.CFrame.Position).Unit)
+				end
+			end
+		end
+		return oldIndex(t, k)
+	end)
+end)
+
+if not hookOk then
+	warn("沉默瞄准 Hook 失败，当前执行器可能不支持 hookmetamethod")
+end
+
+local names = {"最近的一个"}
+local function refreshNames()
+	names = {"最近的一个"}
+	for _, item in ipairs(getList()) do
+		if not table.find(names, item.Name) then
+			table.insert(names, item.Name)
+		end
+	end
+end
+refreshNames()
+
+local parent = (gethui and gethui()) or game:GetService("CoreGui")
+local oldBalls = parent:FindFirstChild("MobileBalls")
+if oldBalls then oldBalls:Destroy() end
+
+local ballGui = Instance.new("ScreenGui")
+ballGui.Name = "MobileBalls"
+ballGui.ResetOnSpawn = false
+ballGui.IgnoreGuiInset = true
+ballGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ballGui.Parent = parent
+
+local circleGui = Instance.new("ScreenGui")
+circleGui.Name = "SilentAimFov"
+circleGui.ResetOnSpawn = false
+circleGui.IgnoreGuiInset = true
+circleGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+circleGui.Parent = parent
+
+local fovCircle = Instance.new("Frame")
+fovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+fovCircle.Position = UDim2.fromScale(0.5, 0.5)
+fovCircle.BackgroundTransparency = 1
+fovCircle.BorderSizePixel = 0
+
+local fovCorner = Instance.new("UICorner")
+fovCorner.CornerRadius = UDim.new(0.5, 0)
+fovCorner.Parent = fovCircle
+
+local fovStroke = Instance.new("UIStroke")
+fovStroke.Thickness = 1.5
+fovStroke.Color = Color3.fromRGB(120, 220, 150)
+fovStroke.Transparency = 0.15
+fovStroke.Parent = fovCircle
+
+fovCircle.Parent = circleGui
+
+local function updateCircle()
+	fovCircle.Size = UDim2.fromOffset(opts.AimFov * 2, opts.AimFov * 2)
+	fovStroke.Thickness = opts.AimThick
+	fovCircle.Visible = opts.AimCircle
+end
+updateCircle()
+
+local doorBall
+local dragState = nil
+
+local function defaultBallPos()
+	return UDim2.new(1, -20, 0.62, 0)
+end
+
+local function makeDoorBall()
+	local btn = Instance.new("TextButton")
+	btn.Name = "DoorBall"
+	btn.Size = UDim2.fromOffset(opts.BallSize, opts.BallSize)
+	btn.Position = defaultBallPos()
+	btn.AnchorPoint = Vector2.new(1, 0)
+	btn.BackgroundColor3 = Color3.fromRGB(38, 38, 46)
+	btn.BackgroundTransparency = 0.15
+	btn.BorderSizePixel = 0
+	btn.AutoButtonColor = false
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = math.floor(opts.BallSize * 0.36)
+	btn.TextColor3 = Color3.fromRGB(235, 235, 235)
+	btn.Text = "门"
+	btn.Active = true
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0.5, 0)
+	corner.Parent = btn
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Thickness = 1.5
+	stroke.Color = Color3.fromRGB(120, 220, 150)
+	stroke.Transparency = 0.15
+	stroke.Parent = btn
+
+	btn.Parent = ballGui
+
+	btn.InputBegan:Connect(function(input)
+		if opts.BallLock then return end
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragState = {btn = btn, start = input.Position, moved = false, switched = false}
+		end
+	end)
+
+	return btn
+end
+
+doorBall = makeDoorBall()
+
+UIS.InputChanged:Connect(function(input)
+	if not dragState then return end
+	if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
+	local btn = dragState.btn
+	local delta = input.Position - dragState.start
+
+	if not dragState.moved then
+		if delta.Magnitude > 8 then
+			dragState.moved = true
+			if not dragState.switched then
+				local abs = btn.AbsolutePosition
+				btn.AnchorPoint = Vector2.new(0, 0)
+				btn.Position = UDim2.fromOffset(abs.X, abs.Y)
+				dragState.switched = true
+				dragState.base = Vector2.new(abs.X, abs.Y)
+				dragState.start = input.Position
+			end
+		end
+	end
+
+	if dragState.moved then
+		local move = input.Position - dragState.start
+		local maxX = math.max(ballGui.AbsoluteSize.X - btn.AbsoluteSize.X, 0)
+		local maxY = math.max(ballGui.AbsoluteSize.Y - btn.AbsoluteSize.Y, 0)
+		btn.Position = UDim2.fromOffset(
+			math.clamp(dragState.base.X + move.X, 0, maxX),
+			math.clamp(dragState.base.Y + move.Y, 0, maxY)
+		)
+	end
+end)
+
+UIS.InputEnded:Connect(function(input)
+	if not dragState then return end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		local moved = dragState.moved
+		dragState = nil
+		if not moved then
+			local ok, err = pcall(fireDoors)
+			if not ok then warn("开门异常：" .. tostring(err)) end
+			doorBall.BackgroundColor3 = Color3.fromRGB(45, 110, 70)
+			task.delay(0.25, function()
+				doorBall.BackgroundColor3 = Color3.fromRGB(38, 38, 46)
+			end)
+		end
+	end
+end)
+
+local function refreshBall()
+	doorBall.Visible = opts.BallShow and opts.DoorBall
+end
+refreshBall()
+
+local Window = WindUI:CreateWindow({
+	Title = "idkname",
+	Icon = "hammer",
+	Author = "GarbageCollection",
+	Folder = "AutoRepair",
+	Size = UDim2.fromOffset(620, 540),
+	Theme = "Dark",
+	User = {
+		Enabled = true,
+		Callback = function()
+			WindUI:Notify({Title = "配置触发", Content = "用户配置回调已执行", Duration = 1.5})
+		end
+	},
+	SideBarWidth = 200,
+	ScrollBarEnabled = true
+})
+
+Window:Tag({Title = "4.1", Color = Color3.fromHex("#306aff")})
+
+task.spawn(function()
+	for _ = 1, 80 do
+		local titleLabel = nil
+		for _, gui in ipairs(parent:GetChildren()) do
+			if gui:IsA("ScreenGui") then
+				for _, d in ipairs(gui:GetDescendants()) do
+					if d:IsA("TextLabel") and d.Visible and d.Text == "idkname" then
+						titleLabel = d
+						break
+					end
+				end
+			end
+			if titleLabel then break end
+		end
+
+		if titleLabel and titleLabel.Parent then
+			local bar = titleLabel.Parent
+			local barAbs = bar.AbsolutePosition
+			local iconImg = nil
+			for _, c in ipairs(bar:GetChildren()) do
+				if c:IsA("ImageLabel") and c.Visible then
+					iconImg = c
+					break
+				end
+			end
+
+			local anchorAbs, anchorSize
+			if iconImg then
+				anchorAbs = iconImg.AbsolutePosition
+				anchorSize = iconImg.AbsoluteSize
+				iconImg.Visible = false
+			else
+				anchorAbs = titleLabel.AbsolutePosition - Vector2.new(34, 0)
+				anchorSize = Vector2.new(28, titleLabel.AbsoluteSize.Y)
+			end
+
+			local oldTag = bar:FindFirstChild("RalesiTag")
+			if oldTag then oldTag:Destroy() end
+
+			local tag = Instance.new("TextLabel")
+			tag.Name = "RalesiTag"
+			tag.BackgroundTransparency = 1
+			tag.BorderSizePixel = 0
+			tag.Font = Enum.Font.GothamBold
+			tag.TextScaled = true
+			tag.TextColor3 = Color3.fromRGB(240, 240, 245)
+			tag.TextXAlignment = Enum.TextXAlignment.Left
+			tag.Text = "ralesi"
+			tag.Size = UDim2.fromOffset(math.max(anchorSize.X, 46), math.max(anchorSize.Y, 20))
+			tag.Position = UDim2.fromOffset(anchorAbs.X - barAbs.X, anchorAbs.Y - barAbs.Y)
+			tag.ZIndex = 50
+			tag.Parent = bar
+			break
+		end
+
+		task.wait(0.25)
+	end
+end)
+
+local Tab = Window:Tab({Title = "修理", Icon = "wrench", Locked = false})
+
+Tab:Paragraph({
+	Title = "每轮强制卸装再装备，锤镐交替",
+	Image = "nil",
+	ImageSize = 20,
+	Color = "Grey",
+	Buttons = {
+		{
+			Title = "停止",
+			Icon = "square",
+			Variant = "Tertiary",
+			Callback = function()
+				stopLoop()
+				WindUI:Notify({Title = "已停止", Content = "修理循环终止", Duration = 1.5})
+			end
+		}
+	}
+})
+
+Tab:Section({Title = "目标设置", TextXAlignment = "Left", TextSize = 17})
+
+Tab:Dropdown({
+	Title = "修理对象",
+	Values = names,
+	Value = "最近的一个",
+	Multi = false,
+	AllowNone = false,
+	Callback = function(option)
+		opts.Mode = option
+	end
+})
+
+Tab:Dropdown({
+	Title = "主武器",
+	Values = {"Hammer", "Shovel"},
+	Value = "Hammer",
+	Multi = false,
+	AllowNone = false,
+	Callback = function(option)
+		opts.Tool = option
+	end
+})
+
+Tab:Toggle({
+	Title = "来回切换武器",
+	Desc = "每轮卸装后换另一把，重置服务端挥击状态",
+	Type = "Checkbox",
+	Default = true,
+	Callback = function(state)
+		opts.AltSwitch = state
+	end
+})
+
+Tab:Toggle({
+	Title = "自动匹配主武器",
+	Desc = "Barricade 类用锤，Earthwork 类用镐",
+	Type = "Checkbox",
+	Default = true,
+	Callback = function(state)
+		opts.AutoTool = state
+	end
+})
+
+Tab:Section({Title = "速度与范围", TextXAlignment = "Left", TextSize = 17})
+
+Tab:Slider({
+	Title = "每轮间隔（秒）",
+	Step = 0.01,
+	Value = {Min = 0.2, Max = 1.0, Default = 0.4},
+	Callback = function(value)
+		opts.Interval = value
+	end
+})
+
+Tab:Slider({
+	Title = "生效距离（格）",
+	Step = 1,
+	Value = {Min = 3, Max = 30, Default = 8},
+	Callback = function(value)
+		opts.MaxDist = value
+	end
+})
+
+Tab:Toggle({
+	Title = "保留挥击动作",
+	Desc = "关掉会更快，但可能被服务端判定无效",
+	Type = "Checkbox",
+	Default = true,
+	Callback = function(state)
+		opts.Animate = state
+	end
+})
+
+local RunToggle = Tab:Toggle({
+	Title = "自动修理",
+	Desc = "未启动",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		if state then
+			startLoop()
+			WindUI:Notify({Title = "已启动", Content = "开始交替修最近目标", Icon = "check", Duration = 2})
+		else
+			stopLoop()
+			WindUI:Notify({Title = "已关闭", Content = "修理循环停止", Icon = "x", Duration = 2})
+		end
+	end
+})
+
+Tab:Button({
+	Title = "刷新目标列表",
+	Callback = function()
+		refreshNames()
+		WindUI:Notify({Title = "已刷新", Content = "共 " .. (#names - 1) .. " 种结构", Duration = 2})
+	end
+})
+
+local DoorTab = Window:Tab({Title = "开门", Icon = "door-open", Locked = false})
+
+DoorTab:Section({Title = "自动开门", TextXAlignment = "Left", TextSize = 17})
+
+DoorTab:Toggle({
+	Title = "自动开门",
+	Desc = "持续循环触发范围内所有门",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		setDoor(state)
+	end
+})
+
+DoorTab:Slider({
+	Title = "开门距离（格）",
+	Step = 1,
+	Value = {Min = 5, Max = 120, Default = 45},
+	Callback = function(value)
+		opts.DoorDist = value
+	end
+})
+
+DoorTab:Slider({
+	Title = "同一扇门冷却（秒）",
+	Step = 0.1,
+	Value = {Min = 0.4, Max = 4, Default = 1.2},
+	Callback = function(value)
+		opts.DoorCd = value
+	end
+})
+
+DoorTab:Button({
+	Title = "立即触发一次",
+	Callback = function()
+		local ok, err = pcall(fireDoors)
+		if ok then
+			local n = #collectRemotes(false)
+			WindUI:Notify({Title = "已触发", Content = "本次扫描到 " .. n .. " 个 Interact", Duration = 2})
+		else
+			WindUI:Notify({Title = "失败", Content = tostring(err), Duration = 2.5})
+		end
+	end
+})
+
+DoorTab:Button({
+	Title = "诊断门结构",
+	Callback = function()
+		local group = resolveGroup(true)
+		if not group then
+			WindUI:Notify({Title = "未找到", Content = "工作区里没有 Destructable", Duration = 3})
+			return
+		end
+		local list = collectRemotes(true)
+		local firstPath = "无"
+		if #list > 0 then
+			firstPath = list[1].remote:GetFullName()
+		end
+		WindUI:Notify({
+			Title = "诊断结果",
+			Content = string.format("%s | Interact×%d | %s", group:GetFullName(), #list, firstPath),
+			Duration = 6
+		})
+	end
+})
+
+local PoseTab = Window:Tab({Title = "姿势", Icon = "user", Locked = false})
+
+PoseTab:Section({Title = "头部固定", TextXAlignment = "Left", TextSize = 17})
+
+PoseTab:Toggle({
+	Title = "头部固定在身体上",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		setPose(state)
+	end
+})
+
+PoseTab:Slider({
+	Title = "抬头角度（0 为原位置）",
+	Step = 5,
+	Value = {Min = -90, Max = 90, Default = 0},
+	Callback = function(value)
+		opts.Pitch = value
+		if opts.PoseOn then poseApply() end
+	end
+})
+
+PoseTab:Button({
+	Title = "重置头部基准",
+	Callback = function()
+		poseCache.neck = nil
+		if neckConn then
+			pcall(function() neckConn:Disconnect() end)
+			neckConn = nil
+		end
+		if opts.PoseOn then
+			poseHook()
+			poseApply()
+		end
+		WindUI:Notify({Title = "已重置", Content = "重新捕获颈部基准", Duration = 1.5})
+	end
+})
+
+local AimTab = Window:Tab({Title = "瞄准", Icon = "crosshair", Locked = false})
+
+AimTab:Section({Title = "沉默瞄准", TextXAlignment = "Left", TextSize = 17})
+
+AimTab:Toggle({
+	Title = "沉默瞄准（锁头）",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		opts.AimOn = state
+		if not state then aimTarget = nil end
+	end
+})
+
+AimTab:Toggle({
+	Title = "队伍检测",
+	Desc = "跳过同队玩家",
+	Type = "Checkbox",
+	Default = true,
+	Callback = function(state)
+		opts.AimTeam = state
+	end
+})
+
+AimTab:Toggle({
+	Title = "墙体检测",
+	Desc = "开启后只锁视野内可见目标",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		opts.AimWall = state
+	end
+})
+
+AimTab:Toggle({
+	Title = "显示 FOV 圆圈",
+	Type = "Checkbox",
+	Default = true,
+	Callback = function(state)
+		opts.AimCircle = state
+		updateCircle()
+	end
+})
+
+AimTab:Slider({
+	Title = "FOV 半径（像素）",
+	Step = 5,
+	Value = {Min = 40, Max = 320, Default = 130},
+	Callback = function(value)
+		opts.AimFov = value
+		updateCircle()
+	end
+})
+
+AimTab:Slider({
+	Title = "圆圈粗细",
+	Step = 0.5,
+	Value = {Min = 1, Max = 4, Default = 1.5},
+	Callback = function(value)
+		opts.AimThick = value
+		updateCircle()
+	end
+})
+
+local ViewTab = Window:Tab({Title = "视角", Icon = "video", Locked = false})
+
+ViewTab:Section({Title = "强制第三人称", TextXAlignment = "Left", TextSize = 17})
+
+ViewTab:Toggle({
+	Title = "强制第三人称",
+	Desc = "开枪时不再被切成第一人称",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		setTP(state)
+	end
+})
+
+ViewTab:Slider({
+	Title = "相机距离（格）",
+	Step = 1,
+	Value = {Min = 4, Max = 20, Default = 7},
+	Callback = function(value)
+		opts.TPDist = value
+		if opts.TPForce then
+			LP.CameraMinZoomDistance = math.max(0.5, math.min(value, LP.CameraMaxZoomDistance))
+			tpLoop()
+		end
+	end
+})
+
+ViewTab:Button({
+	Title = "立刻校正相机",
+	Callback = function()
+		if opts.TPForce then
+			tpLoop()
+			WindUI:Notify({Title = "已校正", Content = "相机已推回第三人称位置", Duration = 1.5})
+		else
+			WindUI:Notify({Title = "未开启", Content = "先打开强制第三人称", Duration = 2})
+		end
+	end
+})
+
+local VoteTab = Window:Tab({Title = "投票", Icon = "hand", Locked = false})
+
+VoteTab:Section({Title = "自动投票踢人", TextXAlignment = "Left", TextSize = 17})
+
+local function voteListNow()
+	local list = playerNames()
+	if #list == 0 then
+		return {"（暂无其他玩家）"}
+	end
+	return list
+end
+
+local VoteDropdown
+
+VoteDropdown = VoteTab:Dropdown({
+	Title = "投票目标",
+	Values = voteListNow(),
+	Value = nil,
+	Multi = false,
+	AllowNone = true,
+	Callback = function(option)
+		opts.VoteTarget = option
+	end
+})
+
+VoteTab:Toggle({
+	Title = "自动刷新玩家列表",
+	Desc = "按刷新间隔自动更新下拉框",
+	Type = "Checkbox",
+	Default = true,
+	Callback = function(state)
+		opts.AutoList = state
+	end
+})
+
+VoteTab:Slider({
+	Title = "列表刷新间隔（秒）",
+	Step = 1,
+	Value = {Min = 1, Max = 30, Default = 5},
+	Callback = function(value)
+		opts.ListDelay = value
+	end
+})
+
+VoteTab:Dropdown({
+	Title = "参数格式",
+	Values = {"玩家名字", "UserId"},
+	Value = "玩家名字",
+	Multi = false,
+	AllowNone = false,
+	Callback = function(option)
+		opts.VoteMode = option
+	end
+})
+
+local VoteToggle
+
+VoteToggle = VoteTab:Toggle({
+	Title = "自动投票",
+	Desc = "多线程高频调用，服务端返回会显示在这里",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		setVote(state)
+	end
+})
+
+VoteTab:Slider({
+	Title = "投票间隔（秒）",
+	Step = 0.1,
+	Value = {Min = 0.1, Max = 10, Default = 2},
+	Callback = function(value)
+		opts.VoteDelay = value
+	end
+})
+
+VoteTab:Slider({
+	Title = "每次连发次数",
+	Step = 1,
+	Value = {Min = 1, Max = 20, Default = 2},
+	Callback = function(value)
+		opts.VoteBurst = value
+	end
+})
+
+VoteTab:Slider({
+	Title = "并发线程数",
+	Step = 1,
+	Value = {Min = 1, Max = 8, Default = 4},
+	Callback = function(value)
+		opts.VoteThreads = value
+	end
+})
+
+VoteTab:Button({
+	Title = "立即投一次",
+	Callback = function()
+		local ok, res = voteOnce()
+		if ok then
+			WindUI:Notify({Title = "已投票", Content = "目标 " .. tostring(opts.VoteTarget) .. " 返回 " .. tostring(res), Duration = 2.5})
+		else
+			WindUI:Notify({Title = "失败", Content = tostring(res), Duration = 3})
+		end
+	end
+})
+
+VoteTab:Button({
+	Title = "手动刷新玩家列表",
+	Callback = function()
+		local list = voteListNow()
+		pcall(function() VoteDropdown:Refresh(list) end)
+		WindUI:Notify({Title = "已刷新", Content = "共 " .. #list .. " 名其他玩家", Duration = 2})
+	end
+})
+
+VoteTab:Button({
+	Title = "诊断投票接口",
+	Callback = function()
+		WindUI:Notify({
+			Title = "诊断结果",
+			Content = VoteEvent and ("RequestVoteKick 存在 (" .. VoteEvent.ClassName .. ")") or "找不到 RequestVoteKick",
+			Duration = 5
+		})
+	end
+})
+
+local BallTab = Window:Tab({Title = "悬浮球", Icon = "circle-dot", Locked = false})
+
+BallTab:Section({Title = "开门快捷键", TextXAlignment = "Left", TextSize = 17})
+
+BallTab:Toggle({
+	Title = "显示开门球",
+	Desc = "圆形按钮，点一次立即触发一次开门",
+	Type = "Checkbox",
+	Default = true,
+	Callback = function(state)
+		opts.DoorBall = state
+		refreshBall()
+	end
+})
+
+BallTab:Toggle({
+	Title = "固定位置",
+	Desc = "打开后球锁定在当前位置不可拖动，关掉即可自由拖动",
+	Type = "Checkbox",
+	Default = false,
+	Callback = function(state)
+		opts.BallLock = state
+	end
+})
+
+BallTab:Button({
+	Title = "球归位到右侧",
+	Callback = function()
+		doorBall.AnchorPoint = Vector2.new(1, 0)
+		doorBall.Position = defaultBallPos()
+		WindUI:Notify({Title = "已归位", Content = "开门球回到右侧默认位置", Duration = 2})
+	end
+})
+
+LP.CharacterAdded:Connect(function()
+	poseCache.neck = nil
+	if opts.PoseOn then
+		poseHook()
+		poseApply()
+		poseBind()
+	end
+	if opts.TPForce then
+		task.wait(0.5)
+		if origZoom then
+			LP.CameraMinZoomDistance = math.max(0.5, math.min(opts.TPDist, LP.CameraMaxZoomDistance))
+		end
+		tpBind()
+		tpLoop()
+	end
+end)
+
+RunService.RenderStepped:Connect(function()
+	if not opts.AimOn then
+		aimTarget = nil
+		return
+	end
+	local ok, t = pcall(pickAimTarget)
+	aimTarget = t
+end)
+
+refreshBall()
+
+task.spawn(function()
+	while task.wait(0.4) do
+		local item, d = nearest(opts.Mode, opts.MaxDist)
+		if running then
+			if item then
+				RunToggle:SetDesc(string.format("目标 %s  距离 %.1f  下一把 %s", item.Name, d, resolveTool(item.Name, swingIndex)))
+			else
+				RunToggle:SetDesc("范围内无目标，走两步再试")
+			end
+		else
+			RunToggle:SetDesc("未启动")
+		end
+
+		if voteRunning then
+			VoteToggle:SetDesc(string.format("调用 %d 次 | %s | %s", voteLast.count, voteLast.ok and "成功" or "拒绝", voteLast.res))
+		elseif not opts.VoteAuto then
+			VoteToggle:SetDesc("多线程高频调用，服务端返回会显示在这里")
+		end
+	end
+end)
+
+task.spawn(function()
+	local lastList = nil
+	local acc = 0
+	while true do
+		local dt = task.wait(0.2)
+		if opts.AutoList then
+			acc = acc + dt
+			if acc >= opts.ListDelay then
+				acc = 0
+				local list = voteListNow()
+				local key = table.concat(list, "|")
+				if key ~= lastList then
+					lastList = key
+					VoteDropdown:Refresh(list)
+				end
+			end
+		else
+			acc = 0
+		end
+	end
+end)
